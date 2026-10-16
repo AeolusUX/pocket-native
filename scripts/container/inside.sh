@@ -52,7 +52,8 @@ python3 tools/third_party.py "$pn/THIRD_PARTY_LICENSES.txt" >/dev/null
 aarch64-linux-gnu-strip -o "$pn/games/$id/title.so" "/work/recomp/$id/$id.so"
 cp /work/shared_font.bin "$pn/games/$id/sysdata/shared_font.bin"
 cp "$game" "$pn/games/$id/game.3ds"
-launcher="$top/${name:-$id}.sh"
+# FAT cards and Windows take no colons and a few other characters in a name
+launcher="$top/$(printf %s "${name:-$id}" | sed 's/: / - /g; s/[\\/:*?"<>|]//g').sh"
 printf '#!/bin/bash\nexec "$(dirname "$0")/pocket-native/run.sh" %s\n' "$id" > "$launcher"
 chmod +x "$launcher" "$pn/run.sh" "$pn/power.sh" "$pn/3ds.sh" "$pn/pocket-native"
 echo "== done: copy \"Pocket Native\" into roms/ports on the handheld's card"
