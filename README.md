@@ -30,7 +30,9 @@ trying a game and adding a profile for it.
 ## What you need
 
 - An R36S (or a close clone) with ArkOS. Other systems are untested.
-- A Linux PC with [podman](https://podman.io) or Docker for the build.
+- A PC for the build: Linux with [podman](https://podman.io) or Docker, or
+  Windows with [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+  or [Podman Desktop](https://podman-desktop.io).
 - Your own dump of the game: a decrypted `.3ds`/`.cci`, or a `.cia` along
   with your console's `aes_keys.txt`.
 
@@ -49,13 +51,24 @@ With a `.cia`:
 scripts/build.sh path/to/game.cia --keys path/to/aes_keys.txt
 ```
 
+On Windows, from the repository's folder in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.3ds
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.cia -Keys path\to\aes_keys.txt
+```
+
+Docker Desktop has to be running. The Windows build keeps its scratch space
+in a Docker volume, `pocket-native-work`; `docker volume rm
+pocket-native-work` frees it.
+
 The first build sets up the build container, which downloads a few hundred
 MB (Ubuntu packages, Rust, crates) and takes a while. Each game's code is
 recompiled to C and compiled for the handheld, which takes several minutes
 for a big game. Later builds reuse what they can.
 
-The result is a `Pocket Native` folder in `build/` (or wherever `--out`
-points), with the game in it. Building more games into the same folder adds
+The result is a `Pocket Native` folder in `build/` (or wherever `--out` or
+`-Out` points), with the game in it. Building more games into the same folder adds
 them next to each other, one launcher each.
 
 ## Installing

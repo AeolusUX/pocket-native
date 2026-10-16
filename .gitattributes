@@ -1,0 +1,4 @@
+# Unix line endings everywhere, even in a Windows checkout: the build runs
+# its scripts in a Linux container and the handheld runs the launchers
+* text=auto eol=lf
+*.font binary
