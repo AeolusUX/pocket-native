@@ -294,14 +294,16 @@ pub struct Gpu {
     /// out, the panel showing the left eye alone. a right eye's picture is a
     /// top one drawn into the buffer the left eye's just went out of, of top
     /// screen draws alone, going to one of the top screen's right buffers.
-    /// four of them in turn and the next ones are skipped, a picture that
-    /// looked like one and was not turning it off for the title.
+    /// four of them in turn and the next ones are skipped. a picture that
+    /// looked like one and was not pauses it until four more, and the third
+    /// time that comes soon after it took up again turns it off for the title.
     pub skip_right_eye: bool,
     right_buffers: Vec<u32>,
     stereo: bool,
     left_eye: Option<u32>,
     right_eye_candidate: bool,
     right_eye_seen: u8,
+    right_eye_short: u8,
     /// the color buffer the draws since the last transfer went to, and
     /// whether they were skipped as the bottom screen's, which a transfer
     /// to the top screen shows was wrong, turning that skipping off for the
@@ -383,6 +385,7 @@ impl Gpu {
             left_eye: None,
             right_eye_candidate: false,
             right_eye_seen: 0,
+            right_eye_short: 0,
             period_target: 0,
             skipped_bottom: false,
             right_eye_wrong: false,
@@ -1098,7 +1101,16 @@ impl Gpu {
     }
 
     fn right_eye_off(&mut self, why: &str) {
-        if !self.right_eye_wrong {
+        if self.right_eye_wrong {
+            return;
+        }
+        if self.right_eye_seen < 60 {
+            self.right_eye_short += 1;
+        }
+        if self.right_eye_short < 3 {
+            log::info!("right eye skipping paused after {} pictures, {why}", self.right_eye_seen);
+            (self.right_eye_seen, self.right_eye_candidate) = (0, false);
+        } else {
             log::info!("switch: right eye skipping off, {why}");
             (self.right_eye_wrong, self.right_eye_candidate) = (true, false);
         }
@@ -1666,5 +1678,24 @@ mod tests {
         gpu.display_transfer(&mut memory, 0x100, 0x180, 4 | (2 << 16), 4 | (2 << 16), flags);
         let red_at = |i: usize| ColorFormat::Rgba8.decode(&memory.0[0x180 + i * 4..0x184 + i * 4])[0];
         assert_eq!([red_at(0), red_at(1)], [50, 100]);
+    }
+
+    #[test]
+    fn a_right_eye_miss_pauses_the_skipping_until_it_keeps_coming() {
+        let mut gpu = Gpu::new();
+        for _ in 0..2 {
+            gpu.right_eye_seen = 200;
+            gpu.right_eye_off("a long run broke");
+        }
+        assert!(!gpu.right_eye_wrong, "misses after long runs pause it");
+        assert_eq!(gpu.right_eye_seen, 0, "and it learns the eye again");
+        for _ in 0..2 {
+            gpu.right_eye_seen = 5;
+            gpu.right_eye_off("a short run broke");
+        }
+        assert!(!gpu.right_eye_wrong, "two short runs are still paused");
+        gpu.right_eye_seen = 5;
+        gpu.right_eye_off("a short run broke");
+        assert!(gpu.right_eye_wrong, "the third short run turns it off for good");
     }
 }
