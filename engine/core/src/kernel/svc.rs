@@ -737,6 +737,10 @@ fn arbitrate_address(system: &mut System) {
         return;
     };
     if let Some(KObject::AddressArbiter(arbiter)) = system.kernel.objects.get_mut(object) {
+        // a thread waits on one address at a time, the entry a wait of its
+        // that timed out left behind goes, else a title that waits with
+        // timeouts in a loop grows the list without end
+        arbiter.waiters.retain(|&(thread, _)| thread != thread_id);
         arbiter.waiters.push((thread_id, address));
     }
     let now = system.cpu.cycles;

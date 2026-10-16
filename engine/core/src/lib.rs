@@ -1373,4 +1373,28 @@ mod tests {
         assert_eq!(system.kernel.thread(ended).status, ThreadStatus::Dead);
         assert_eq!(system.kernel.thread(parked).status, ThreadStatus::Ready);
     }
+
+    #[test]
+    fn timed_out_arbiter_waits_leave_one_entry_a_thread() {
+        let mut system = System::new(Config::default());
+        let waiter = system.kernel.create_thread("waiter", 0x0010_0000, 0x1000_0000, 0, 0x30, 0);
+        system.map_tls_page(waiter);
+        system.kernel.schedule(&mut system.cpu, 0);
+        kernel::svc::dispatch(&mut system, 0x21);
+        let arbiter = system.cpu.regs[1];
+        let address = system.kernel.thread(waiter).tls + 0x100;
+        system.memory.write32(address, 0);
+        for round in 1..=50 {
+            system.kernel.current_thread = Some(waiter);
+            system.kernel.thread_mut(waiter).status = ThreadStatus::Running;
+            system.cpu.regs[..5].copy_from_slice(&[arbiter, address, 3, 1, 1000]);
+            kernel::svc::dispatch(&mut system, 0x22);
+            system.kernel.current_thread = None;
+            system.kernel.schedule(&mut system.cpu, round * 1_000_000);
+        }
+        let Some(KObject::AddressArbiter(arbiter)) = system.kernel.resolve(arbiter).and_then(|object| system.kernel.objects.get(object)) else {
+            panic!("no arbiter");
+        };
+        assert_eq!(arbiter.waiters.len(), 1);
+    }
 }
