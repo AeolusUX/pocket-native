@@ -1,0 +1,16 @@
+# builds and tests the whole workspace, the GPU tests skip themselves on a
+# runner without OpenGL ES
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - run: cargo test --release --locked --workspace --features zakuro-gpu/gles

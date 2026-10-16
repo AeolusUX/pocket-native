@@ -1,0 +1,5 @@
+name = "Minecraft: New Nintendo 3DS Edition"
+
+# draws a second picture for the top screen that is not the right eye's
+[advanced]
+skip_right_eye = false

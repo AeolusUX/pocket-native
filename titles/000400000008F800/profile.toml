@@ -1,0 +1,5 @@
+name = "The Legend of Zelda: Ocarina of Time 3D"
+
+# needs the PICA's own multiplication, 0 times infinity being 0
+[advanced]
+plain_math = false

@@ -1,0 +1,5 @@
+name = "Luigi's Mansion 2"
+
+# draws a second picture for the top screen that is not the right eye's
+[advanced]
+skip_right_eye = false

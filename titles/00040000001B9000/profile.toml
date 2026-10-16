@@ -1,0 +1,5 @@
+name = "Mario & Luigi: Superstar Saga + Bowser's Minions"
+
+# needs the PICA's own multiplication, 0 times infinity being 0
+[advanced]
+plain_math = false

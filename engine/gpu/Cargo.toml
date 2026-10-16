@@ -1,0 +1,27 @@
+[package]
+name = "zakuro-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+gles = ["dep:glow", "dep:glutin_egl_sys", "dep:libloading"]
+
+[dependencies]
+zakuro-common.workspace = true
+log.workspace = true
+bitflags.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+wide = "1.7"
+libc = "0.2"
+rustc-hash = "1.1"
+
+glow = { version = "0.16", optional = true }
+glutin_egl_sys = { version = "0.7", optional = true }
+libloading = { version = "0.8", optional = true }
+
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["glsl-in", "wgsl-in", "spv-out"] }

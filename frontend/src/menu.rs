@@ -1,0 +1,546 @@
+//! the menu a tap of FN opens: the game pauses under it, the d-pad moves and
+//! changes, A picks, B or FN goes back to the game.
+
+use std::collections::HashSet;
+
+use crate::font::{rgba, Canvas};
+use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
+use crate::profile::Profile;
+use crate::settings::{Advanced, Buttons, GameSettings, Layout, Power, Settings, Speed, Stick};
+
+const PANEL: [u8; 3] = [13, 20, 32];
+const EDGE: [u8; 3] = [40, 110, 210];
+const HEADER: [u8; 3] = [18, 40, 76];
+const HIGHLIGHT: [u8; 3] = [24, 64, 124];
+const TEXT: [u8; 3] = [230, 238, 248];
+const DIM: [u8; 3] = [130, 152, 182];
+const ACCENT: [u8; 3] = [90, 170, 255];
+const WARNING: [u8; 3] = [255, 196, 90];
+/// the face sizes in the font, the list's and the small one.
+const BIG: usize = 0;
+const SMALL: usize = 1;
+const ROW: f32 = 19.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Layout,
+    Smooth,
+    Interpolate,
+    ShowFps,
+    ShowClock,
+    FrameCap,
+    Power,
+    Option(usize),
+    TouchSpeed,
+    Buttons,
+    LeftStick,
+    Resume,
+    Advanced,
+    Reset,
+    Quit,
+    Toggle(usize),
+    FrameSkip,
+    Restart,
+    Compatible,
+    Defaults,
+    Back,
+}
+
+const ON_OFF: [&str; 2] = ["Off", "On"];
+
+/// the advanced settings that turn on and off, see settings::Advanced: the
+/// name, the setting, what off and on show as, and the help under the list.
+#[allow(clippy::type_complexity)]
+const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 29] = [
+    ("Bottom screen skipping", |a| &mut a.skip_bottom, ON_OFF, "Draws the bottom screen less often while it stands still. Try Off if it flickers, lags or goes black."),
+    ("Speed hacks", |a| &mut a.fast, ON_OFF, "Turns the ten speed hacks below on or off together. Off is the first thing to try when a game looks wrong."),
+    ("Quick surface checks", |a| &mut a.quick_checks, ON_OFF, "Checks pictures against memory at a few spots only. Try Off if old pictures or garbage stay after a scene change."),
+    ("Half-precision color", |a| &mut a.half_precision, ON_OFF, "Faster color math on the GPU. Try Off for banding, wrong colors or speckles."),
+    ("Fast vertex math", |a| &mut a.plain_math, ON_OFF, "Faster shape math. Try Off if shapes are missing, stretch into spikes or turn black."),
+    ("Depth tiles on the GPU", |a| &mut a.tile_copies, ON_OFF, "Moves depth between buffers on the GPU. Try Off if shadows, fog or outlines go wrong."),
+    ("Clears on the GPU", |a| &mut a.gpu_clears, ON_OFF, "Clears whole buffers on the GPU alone. Try Off for leftover pictures or black screens."),
+    ("Vertex arrays on the GPU", |a| &mut a.gpu_arrays, ON_OFF, "Keeps shapes in GPU memory. Try Off if shapes flicker or break apart."),
+    ("Trust cached meshes", |a| &mut a.trust_meshes, ON_OFF, "Reuses shapes for a few pictures without reading them again. Try Off if trees, grass or characters flicker or lag."),
+    ("Trust cached textures", |a| &mut a.trust_textures, ON_OFF, "Reuses textures for a few pictures without reading them again. Try Off if a texture is late to change."),
+    ("Small texture cache", |a| &mut a.small_cache, ON_OFF, "Keeps a quarter of the textures, to save memory. Try Off if busy scenes stutter."),
+    ("Hide scenery out of view", |a| &mut a.cull, ON_OFF, "Skips big shapes that were not on screen a moment ago. Try Off if things pop in or flicker at the edges."),
+    ("Renderer", |a| &mut a.gpu_drawing, ["Software", "GPU"], "Software is far too slow to play, for telling apart whether a glitch is the GPU's."),
+    ("Vertex shading", |a| &mut a.gpu_vertices, ["CPU", "GPU"], "Where shapes are shaded. Try CPU if shapes are wrong, it is slower."),
+    ("Display transfers", |a| &mut a.gpu_transfers, ["CPU", "GPU"], "How pictures reach the screens. Try CPU for garbage, wrong colors or the wrong picture on a screen."),
+    ("Drawn texture copies", |a| &mut a.gpu_texture_copies, ["Memory", "GPU"], "Pictures a game draws and reuses as textures. Try Memory if it crashes or freezes, or for wrong reflections."),
+    ("Drawn textures in place", |a| &mut a.in_place, ON_OFF, "Reads those pictures without copying them. Try Off for upside-down or shifted effects."),
+    ("Compressed textures", |a| &mut a.etc1, ON_OFF, "Leaves compressed textures to the GPU. Try Off for blocky or wrongly colored textures."),
+    ("Generic shaders", |a| &mut a.generic_shaders, ON_OFF, "One program for every draw rather than one each. Slower to draw, but nothing new to build. Try On for hitches."),
+    ("Generic lighting", |a| &mut a.generic_lighting, ON_OFF, "The same for lit draws only. Try On for hitches when lights change."),
+    ("Vertex ranges", |a| &mut a.draw_ranges, ON_OFF, "Reads only the vertices a draw uses. Try Off if shapes are missing or broken."),
+    ("GPU thread", |a| &mut a.gpu_thread, ON_OFF, "Draws on a core of its own. Try Off for crashes or glitches that come and go, it is slower."),
+    ("Real-time GPU", |a| &mut a.realtime_gpu, ON_OFF, "Time goes on while the GPU draws, as on the console. Try On if the game runs too fast or its timing is off."),
+    ("CPU", |a| &mut a.recompiled, ["Interpreter", "Recompiled"], "The interpreter is far too slow to play, for telling apart a crash of the recompiled code."),
+    ("Exact event timing", |a| &mut a.exact_events, ON_OFF, "Runs the game's code up to each event's exact time. Try On for freezes or sound that stutters, it is a little slower."),
+    ("Shader prewarm", |a| &mut a.prewarm, ON_OFF, "Builds the shaders this game used before while it starts. Try Off if it will not start."),
+    ("ROM read-ahead", |a| &mut a.read_ahead, ON_OFF, "Reads the parts of the game it loaded last time ahead. Try Off if loading stalls."),
+    ("Shader compiling", |a| &mut a.background_shaders, ["When needed", "Background"], "Background builds new shaders with no pause, a stand-in drawn meanwhile. Try When needed for brief glitches."),
+    ("Skip the right eye", |a| &mut a.skip_right_eye, ON_OFF, "Leaves out the right eye's picture, which 2D never shows. Try Off if the top screen flickers or is wrong."),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Page {
+    #[default]
+    Main,
+    Advanced,
+}
+
+impl Field {
+    /// picked with A rather than changed with left and right.
+    fn action(self) -> bool {
+        matches!(self, Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Compatible | Field::Defaults | Field::Back)
+    }
+}
+
+pub enum Action {
+    None,
+    Redraw,
+    /// a setting changed, which the game takes up at once.
+    Changed,
+    Resume,
+    Reset,
+    Quit,
+}
+
+/// the layouts the menu goes through, with the screens swapped or not.
+const LAYOUTS: [(Layout, bool, &str); 6] = [
+    (Layout::BigTop, false, "Big top"),
+    (Layout::BigTop, true, "Swapped"),
+    (Layout::TopOnly, false, "Top only"),
+    (Layout::TopOnly, true, "Bottom only"),
+    (Layout::SideBySide, false, "Side by side"),
+    (Layout::Original, false, "Original size"),
+];
+const CAPS: [u32; 3] = [20, 30, 60];
+
+#[derive(Default)]
+pub struct Menu {
+    pub open: bool,
+    page: Page,
+    cursor: usize,
+    /// Reset or Quit waiting for A again.
+    confirm: Option<usize>,
+    last: HashSet<u16>,
+    held: u32,
+}
+
+fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
+    let toggles = |range: std::ops::RangeInclusive<usize>| range.map(Field::Toggle).collect();
+    match page {
+        Page::Main => vec![
+            ("Display", vec![Field::Layout, Field::Smooth, Field::Interpolate, Field::ShowFps, Field::ShowClock]),
+            ("Performance", vec![Field::FrameCap, Field::Power]),
+            ("This game", (0..profile.options.len()).map(Field::Option).collect()),
+            ("Controls", vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick]),
+            ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
+        ],
+        Page::Advanced => vec![
+            ("Applies at once", vec![Field::Toggle(0), Field::Toggle(28), Field::FrameSkip]),
+            ("Speed hacks - requires restart", toggles(1..=11)),
+            ("Graphics - requires restart", toggles(12..=22)),
+            ("CPU - requires restart", toggles(23..=24)),
+            ("Loading - requires restart", toggles(25..=27)),
+            ("", vec![Field::Restart, Field::Compatible, Field::Defaults, Field::Back]),
+        ],
+    }
+}
+
+fn step<T: Copy + PartialEq>(values: &[T], current: T, by: isize) -> T {
+    let at = values.iter().position(|&value| value == current).unwrap_or(0) as isize;
+    values[(at + by).rem_euclid(values.len() as isize) as usize]
+}
+
+fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profile) -> (String, String) {
+    let (name, value) = match field {
+        Field::Layout => {
+            let named = LAYOUTS.iter().find(|(layout, swapped, _)| (*layout, *swapped) == (settings.layout, settings.swapped));
+            let value = match named {
+                Some((.., name)) => name.to_string(),
+                None => format!("{}, swapped", LAYOUTS.iter().find(|(layout, ..)| *layout == settings.layout).map_or("", |(.., name)| name)),
+            };
+            ("Layout", value)
+        }
+        Field::Smooth => ("Smooth scaling", if settings.smooth { "On" } else { "Off" }.into()),
+        Field::Interpolate => ("Frame interpolation", if settings.interpolate_to == 0 { "Off".into() } else { format!("Up to {} fps", settings.interpolate_to) }),
+        Field::ShowFps => ("Show fps", if settings.show_fps { "On" } else { "Off" }.into()),
+        Field::ShowClock => ("Clock and battery", if settings.show_clock { "On" } else { "Off" }.into()),
+        Field::FrameCap => ("Frame cap", format!("{} fps", settings.frame_cap)),
+        Field::Power => ("Power", format!("{:?}", settings.power)),
+        Field::Option(index) => {
+            let option = &profile.options[index];
+            let on = game.options.get(&option.name).copied().unwrap_or(option.default);
+            return (option.name.clone(), option.values[on as usize].clone());
+        }
+        Field::TouchSpeed => ("Touch cursor speed", format!("{:?}", settings.touch_speed)),
+        Field::Buttons => ("A/B layout", format!("{:?}", settings.buttons)),
+        Field::LeftStick => ("Left stick", if settings.left_stick == Stick::CirclePad { "Circle pad" } else { "D-pad" }.into()),
+        Field::Resume => ("Resume", String::new()),
+        Field::Advanced => ("Advanced settings", "→".into()),
+        Field::Reset => ("Reset", String::new()),
+        Field::Quit => ("Quit", String::new()),
+        Field::Toggle(index) => {
+            let (name, setting, values, _) = TOGGLES[index];
+            let mut advanced = Advanced::of(game, profile);
+            return (name.to_owned(), values[*setting(&mut advanced) as usize].to_owned());
+        }
+        Field::FrameSkip => {
+            let skip = Advanced::of(game, profile).frame_skip;
+            ("Frame skip", if skip == 0 { "Off".into() } else { format!("Up to {skip}") })
+        }
+        Field::Restart => ("Restart game", String::new()),
+        Field::Compatible => ("Most compatible", String::new()),
+        Field::Defaults => ("Reset to defaults", String::new()),
+        Field::Back => ("Back", String::new()),
+    };
+    (name.to_owned(), value)
+}
+
+fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSettings, profile: &Profile) {
+    match field {
+        Field::Layout => {
+            let at = LAYOUTS.iter().position(|(layout, swapped, _)| (*layout, *swapped) == (settings.layout, settings.swapped));
+            let at = at.or_else(|| LAYOUTS.iter().position(|(layout, ..)| *layout == settings.layout)).unwrap_or(0) as isize;
+            let (layout, swapped, _) = LAYOUTS[(at + by).rem_euclid(LAYOUTS.len() as isize) as usize];
+            (settings.layout, settings.swapped) = (layout, swapped);
+        }
+        Field::Smooth => settings.smooth = !settings.smooth,
+        Field::Interpolate => settings.interpolate_to = step(&[0, 30, 60], settings.interpolate_to, by),
+        Field::ShowFps => settings.show_fps = !settings.show_fps,
+        Field::ShowClock => settings.show_clock = !settings.show_clock,
+        Field::FrameCap => settings.frame_cap = step(&CAPS, settings.frame_cap, by),
+        Field::Power => settings.power = step(&[Power::Saver, Power::Balanced, Power::Performance], settings.power, by),
+        Field::Option(index) => {
+            let option = &profile.options[index];
+            let on = game.options.get(&option.name).copied().unwrap_or(option.default);
+            game.options.insert(option.name.clone(), !on);
+        }
+        Field::TouchSpeed => settings.touch_speed = step(&[Speed::Slow, Speed::Normal, Speed::Fast], settings.touch_speed, by),
+        Field::Buttons => settings.buttons = step(&[Buttons::Nintendo, Buttons::Xbox], settings.buttons, by),
+        Field::LeftStick => settings.left_stick = step(&[Stick::CirclePad, Stick::Dpad], settings.left_stick, by),
+        Field::Toggle(index) => {
+            let mut advanced = Advanced::of(game, profile);
+            let setting = (TOGGLES[index].1)(&mut advanced);
+            *setting = !*setting;
+            game.advanced = Some(advanced);
+        }
+        Field::FrameSkip => {
+            let mut advanced = Advanced::of(game, profile);
+            advanced.frame_skip = step(&[0, 1, 2, 3], advanced.frame_skip, by);
+            game.advanced = Some(advanced);
+        }
+        Field::Compatible => game.advanced = Some(Advanced::compatible(Advanced::of(game, profile))),
+        Field::Defaults => game.advanced = None,
+        Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Back => {}
+    }
+}
+
+/// what the help under the list says about a field.
+fn help(field: Field, profile: &Profile) -> &str {
+    match field {
+        Field::Layout => "Where the screens go. L2 swaps them, FN and R1 switch to one big screen.",
+        Field::Smooth => "Smooths the picture as it is scaled up. Off is sharper, with uneven pixels.",
+        Field::Interpolate => "Fills in pictures halfway between a game's, up to 30 or 60 a second. 30 costs half as much GPU time.",
+        Field::ShowFps => "Pictures a second and the temperature, in the bottom right corner.",
+        Field::ShowClock => "The battery and a 12-hour clock, in the bottom left corner.",
+        Field::FrameCap => "The most pictures shown a second. Lower lasts longer and runs cooler.",
+        Field::Power => "How fast the CPU and GPU run. Performance is fastest and warmest, Saver lasts longest.",
+        Field::Option(index) => &profile.options[index].help,
+        Field::TouchSpeed => "How fast the right stick moves the touch cursor. R2 or R3 touches.",
+        Field::Buttons => "Which face buttons are A and B: where Nintendo puts them, or where Xbox does.",
+        Field::LeftStick => "The left stick as the circle pad, or as the d-pad.",
+        Field::Resume => "Back to the game. B or FN does the same.",
+        Field::Advanced => "This game's switches for speed and for games that do not run right, each with a hint.",
+        Field::Reset => "Starts the game again from the beginning.",
+        Field::Quit => "Back to EmulationStation.",
+        Field::Toggle(index) => TOGGLES[index].3,
+        Field::FrameSkip => "The most pictures left out in a row while the game is behind. Off is smoother and slower.",
+        Field::Restart => "Starts the game again, for the settings that require a restart.",
+        Field::Compatible => "Turns off every speed hack a game could trip over, then restart. If that helps, turn them back on one at a time.",
+        Field::Defaults => "Back to what this game starts with.",
+        Field::Back => "Back to the menu.",
+    }
+}
+
+/// text broken into lines no wider than width.
+fn wrap(canvas: &Canvas, face: usize, text: &str, width: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if canvas.measure(face, &format!("{line} {word}")) <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_owned()),
+        }
+    }
+    lines
+}
+
+impl Menu {
+    pub fn show(&mut self) {
+        (self.open, self.page, self.confirm) = (true, Page::Main, None);
+    }
+
+    /// back from the advanced settings to the entry that opened them.
+    fn back(&mut self, profile: &Profile) -> Action {
+        let fields: Vec<Field> = sections(Page::Main, profile).into_iter().flat_map(|(_, fields)| fields).collect();
+        (self.page, self.confirm) = (Page::Main, None);
+        self.cursor = fields.iter().position(|&field| field == Field::Advanced).unwrap_or(0);
+        Action::Redraw
+    }
+
+    /// the keys held this frame, d-pad presses repeating while held.
+    pub fn input(&mut self, keys: &HashSet<u16>, settings: &mut Settings, game: &mut GameSettings, profile: &Profile) -> Action {
+        let direction = [UP, DOWN, LEFT, RIGHT].into_iter().find(|key| keys.contains(key));
+        self.held = if direction.is_some_and(|key| self.last.contains(&key)) { self.held + 1 } else { 0 };
+        let repeat = self.held == 0 || (self.held >= 18 && self.held.is_multiple_of(5));
+        let pressed = |key: u16| keys.contains(&key) && !self.last.contains(&key);
+        let (a, b) = (pressed(A), pressed(B));
+        self.last = keys.clone();
+        let fields: Vec<Field> = sections(self.page, profile).into_iter().flat_map(|(_, fields)| fields).collect();
+        self.cursor = self.cursor.min(fields.len() - 1);
+        let field = fields[self.cursor];
+        match direction.filter(|_| repeat) {
+            Some(UP) | Some(DOWN) => {
+                let by = if direction == Some(UP) { fields.len() - 1 } else { 1 };
+                (self.cursor, self.confirm) = ((self.cursor + by) % fields.len(), None);
+                return Action::Redraw;
+            }
+            Some(key) if !field.action() => {
+                change(field, if key == LEFT { -1 } else { 1 }, settings, game, profile);
+                return Action::Changed;
+            }
+            _ => {}
+        }
+        if b {
+            if self.confirm.take().is_some() {
+                return Action::Redraw;
+            }
+            if self.page == Page::Advanced {
+                return self.back(profile);
+            }
+            self.open = false;
+            return Action::Resume;
+        }
+        if !a {
+            return Action::None;
+        }
+        match field {
+            Field::Resume => {
+                self.open = false;
+                Action::Resume
+            }
+            Field::Advanced => {
+                (self.page, self.cursor) = (Page::Advanced, 0);
+                Action::Redraw
+            }
+            Field::Back => self.back(profile),
+            Field::Reset | Field::Quit | Field::Restart if self.confirm != Some(self.cursor) => {
+                self.confirm = Some(self.cursor);
+                Action::Redraw
+            }
+            Field::Reset | Field::Restart => Action::Reset,
+            Field::Quit => Action::Quit,
+            field => {
+                change(field, 1, settings, game, profile);
+                Action::Changed
+            }
+        }
+    }
+
+    pub fn draw(&self, canvas: &mut Canvas, settings: &Settings, game: &GameSettings, profile: &Profile, title: &str) {
+        canvas.fill([0.0, 0.0, 640.0, 480.0], rgba([0, 0, 0], 150));
+        let (x0, y0, x1, y1) = (120.0, 16.0, 520.0, 464.0);
+        canvas.fill([x0, y0, x1, y1], rgba(PANEL, 255));
+        canvas.fill([x0 + 2.0, y0 + 2.0, x1 - 2.0, y0 + 30.0], rgba(HEADER, 255));
+        canvas.outline([x0, y0, x1, y1], 2.0, rgba(EDGE, 255));
+        let (heading, state) = if self.page == Page::Advanced { ("Advanced", "This game") } else { ("Pocket Native", "Paused") };
+        canvas.text(BIG, heading, x0 + 14.0, y0 + 7.0, rgba(TEXT, 255), false);
+        canvas.text(SMALL, &format!("{title} · {state}"), x1 - 14.0, y0 + 9.0, rgba(DIM, 255), true);
+
+        // the headings and fields from the top of the list, scrolled to keep
+        // the selected field in view
+        let mut rows = Vec::new();
+        let (mut y, mut index, mut selected) = (0.0, 0, 0.0);
+        for (section, fields) in sections(self.page, profile) {
+            y += 3.0;
+            if !section.is_empty() {
+                rows.push((y, None, section));
+                y += ROW;
+            }
+            if fields.is_empty() {
+                rows.push((y, None, "Nothing to set for this game"));
+                y += ROW;
+            }
+            for field in fields {
+                if index == self.cursor {
+                    selected = y;
+                }
+                rows.push((y, Some((index, field)), ""));
+                (y, index) = (y + ROW, index + 1);
+            }
+        }
+        // two lines of help above the footer
+        let help_top = y1 - 66.0;
+        let (top, height) = (y0 + 41.0, help_top - 4.0 - (y0 + 41.0));
+        let scroll = (selected + ROW - height).max(0.0);
+        let more = match (scroll > 0.0, y - scroll > height) {
+            (true, true) => "↑ ↓",
+            (true, false) => "↑",
+            (false, true) => "↓",
+            (false, false) => "",
+        };
+        canvas.text(SMALL, more, (x0 + x1) / 2.0 + 6.0, y1 - 21.0, rgba(ACCENT, 255), false);
+        for (y, field, text) in rows {
+            let y = y - scroll;
+            if y < 0.0 || y + ROW > height {
+                continue;
+            }
+            let y = top + y;
+            let Some((index, field)) = field else {
+                let color = if text.starts_with("Nothing") { DIM } else { ACCENT };
+                canvas.text(SMALL, text, x0 + if color == DIM { 22.0 } else { 14.0 }, y, rgba(color, 255), false);
+                continue;
+            };
+            let selected = index == self.cursor;
+            if selected {
+                canvas.fill([x0 + 8.0, y - 2.0, x1 - 8.0, y + 17.0], rgba(HIGHLIGHT, 255));
+            }
+            let (name, value) = label(field, settings, game, profile);
+            if self.confirm == Some(index) {
+                let ask = match field {
+                    Field::Quit => "Quit? Unsaved progress is lost",
+                    Field::Restart => "Restart? Unsaved progress is lost",
+                    _ => "Reset? Unsaved progress is lost",
+                };
+                canvas.text(BIG, ask, x0 + 22.0, y, rgba(WARNING, 255), false);
+                canvas.text(SMALL, "A again", x1 - 18.0, y + 2.0, rgba(WARNING, 255), true);
+            } else {
+                canvas.text(BIG, &name, x0 + 22.0, y, rgba(TEXT, 255), false);
+                let value = if selected && field == Field::Layout { format!("<  {value}  >") } else { value };
+                canvas.text(BIG, &value, x1 - 18.0, y, rgba(if selected { TEXT } else { ACCENT }, 255), true);
+            }
+        }
+        canvas.fill([x0 + 10.0, help_top, x1 - 10.0, help_top + 1.0], rgba([32, 48, 72], 255));
+        let fields: Vec<Field> = sections(self.page, profile).into_iter().flat_map(|(_, fields)| fields).collect();
+        if let Some(&field) = fields.get(self.cursor) {
+            let lines = wrap(canvas, SMALL, help(field, profile), x1 - x0 - 28.0);
+            for (line, text) in lines.iter().take(2).enumerate() {
+                canvas.text(SMALL, text, x0 + 14.0, help_top + 6.0 + line as f32 * 16.0, rgba(DIM, 255), false);
+            }
+        }
+        canvas.fill([x0 + 10.0, y1 - 27.0, x1 - 10.0, y1 - 26.0], rgba([32, 48, 72], 255));
+        canvas.text(SMALL, "A  select    B  back", x0 + 14.0, y1 - 21.0, rgba(DIM, 255), false);
+        canvas.text(SMALL, "Left/right  change", x1 - 14.0, y1 - 21.0, rgba(DIM, 255), true);
+    }
+}
+
+/// what the bottom corners show while the game runs: the frame rate and the
+/// temperature at the right, the battery and the time at the left.
+#[derive(PartialEq)]
+pub struct Status {
+    fps: Option<String>,
+    battery: Option<i64>,
+    clock: Option<String>,
+}
+
+impl Status {
+    /// none when the settings show nothing.
+    pub fn now(settings: &Settings, fps: u32) -> Option<Status> {
+        let read = |path: &str| std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse::<i64>().ok());
+        let status = Status {
+            fps: settings.show_fps.then(|| match read("/sys/class/thermal/thermal_zone0/temp") {
+                Some(milli) => format!("{fps} fps · {}°C", milli / 1000),
+                None => format!("{fps} fps"),
+            }),
+            battery: settings.show_clock.then(|| read("/sys/class/power_supply/battery/capacity")).flatten(),
+            clock: settings.show_clock.then(clock),
+        };
+        (status.fps.is_some() || status.clock.is_some()).then_some(status)
+    }
+
+    pub fn draw(&self, canvas: &mut Canvas, (width, height): (u32, u32)) {
+        let (width, height) = (width as f32, height as f32);
+        let (top, bottom) = (height - 32.0, height - 8.0);
+        let backing = rgba([0, 0, 0], 160);
+        if let Some(line) = &self.fps {
+            canvas.fill([width - 20.0 - canvas.measure(BIG, line), top, width - 8.0, bottom], backing);
+            canvas.text(BIG, line, width - 14.0, top + 3.0, rgba(TEXT, 255), true);
+        }
+        let Some(clock) = &self.clock else { return };
+        let mut x = 14.0;
+        let mut drawn = Vec::new();
+        if let Some(battery) = self.battery {
+            let color = rgba(if battery <= 15 { WARNING } else { TEXT }, 255);
+            let y = top + 7.0;
+            drawn.push(([x, y, x + 22.0, y + 11.0], 1.5, color));
+            drawn.push(([x + 22.0, y + 3.5, x + 24.0, y + 7.5], 0.0, color));
+            drawn.push(([x + 3.0, y + 3.0, x + 3.0 + 16.0 * battery.clamp(0, 100) as f32 / 100.0, y + 8.0], 0.0, color));
+            x += 30.0;
+        }
+        let text = match self.battery {
+            Some(battery) => format!("{battery}%   {clock}"),
+            None => clock.clone(),
+        };
+        canvas.fill([8.0, top, x + canvas.measure(BIG, &text) + 6.0, bottom], backing);
+        for (area, outline, color) in drawn {
+            if outline > 0.0 { canvas.outline(area, outline, color) } else { canvas.fill(area, color) }
+        }
+        canvas.text(BIG, &text, x, top + 3.0, rgba(TEXT, 255), false);
+    }
+}
+
+fn clock() -> String {
+    // SAFETY: time and localtime_r fill a tm of this function's
+    let tm = unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        tm
+    };
+    format!("{}:{:02} {}", (tm.tm_hour + 11) % 12 + 1, tm.tm_min, if tm.tm_hour < 12 { "AM" } else { "PM" })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::font::Font;
+
+    /// every field's help fits the two lines under the list.
+    #[test]
+    fn the_help_fits_its_two_lines() {
+        let font = Font::load();
+        let canvas = Canvas::new(&font, (640, 480));
+        let profile = Profile::default();
+        let long: Vec<String> = [Page::Main, Page::Advanced]
+            .into_iter()
+            .flat_map(|page| sections(page, &profile).into_iter().flat_map(|(_, fields)| fields))
+            .filter_map(|field| {
+                let lines = wrap(&canvas, SMALL, help(field, &profile), 400.0 - 28.0);
+                (lines.is_empty() || lines.len() > 2).then(|| format!("{field:?}: {lines:?}"))
+            })
+            .collect();
+        assert!(long.is_empty(), "{long:#?}");
+    }
+
+    /// and so does the help of every profile's options.
+    #[test]
+    fn the_profiles_help_fits_too() {
+        let font = Font::load();
+        let canvas = Canvas::new(&font, (640, 480));
+        let titles = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../titles");
+        for entry in std::fs::read_dir(titles).unwrap() {
+            let path = entry.unwrap().path().join("profile.toml");
+            let profile: Profile = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            for option in &profile.options {
+                let lines = wrap(&canvas, SMALL, &option.help, 400.0 - 28.0);
+                assert!(lines.len() <= 2, "{}: {lines:?}", path.display());
+            }
+        }
+    }
+}

@@ -1,0 +1,45 @@
+//! what is drawn over the screens.
+
+/// what is drawn over the screens, a user interface, as textured triangles
+/// in window pixels.
+#[derive(Default)]
+pub struct Overlay {
+    /// textures to make or change before drawing.
+    pub textures: Vec<OverlayTexture>,
+    pub meshes: Vec<OverlayMesh>,
+    /// textures that go away once this frame is drawn.
+    pub free: Vec<u64>,
+}
+
+/// pixels for a texture of the overlay.
+pub struct OverlayTexture {
+    pub id: u64,
+    /// where the pixels go in a texture that exists, none to make it anew at
+    /// this size.
+    pub offset: Option<[u32; 2]>,
+    pub size: [u32; 2],
+    /// RGBA, premultiplied by alpha, in sRGB.
+    pub pixels: Vec<u8>,
+    /// filtered when scaled, rather than nearest.
+    pub linear: bool,
+}
+
+/// one corner of an overlay triangle.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OverlayVertex {
+    /// window pixels from the top left.
+    pub position: [f32; 2],
+    pub uv: [f32; 2],
+    /// premultiplied sRGB.
+    pub color: [u8; 4],
+}
+
+/// triangles of the overlay that share a texture and a clip.
+pub struct OverlayMesh {
+    pub texture: u64,
+    /// the part of the window they may draw in, left, top, right, bottom.
+    pub clip: [u32; 4],
+    pub vertices: Vec<OverlayVertex>,
+    pub indices: Vec<u32>,
+}

@@ -1,0 +1,12 @@
+/target
+build/
+*.log
+/dump
+/user/
+/sysdata/
+*.3ds
+*.cci
+*.cia
+*.cxi
+aes_keys.txt
+.DS_Store

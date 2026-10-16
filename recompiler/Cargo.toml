@@ -1,0 +1,21 @@
+[package]
+name = "recomp3ds"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "Static recompilation toolkit for the Nintendo 3DS"
+
+[[bin]]
+name = "3dsrecomp"
+path = "src/main.rs"
+
+[features]
+# loading a recompiled library from Rust
+host = ["recomp-abi/load"]
+# checking recompiled code against Zakuro's interpreter, which it fetches
+verify = ["host", "dep:zakuro-cpu"]
+
+[dependencies]
+recomp-abi = { path = "abi", default-features = false }
+zakuro-cpu = { workspace = true, optional = true }
