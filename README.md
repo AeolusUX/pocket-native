@@ -1,5 +1,9 @@
 # Pocket Native
 
+If you have not used it before, [start here](START_HERE.md). The short
+version: there is no app to install and no game included, a PC rebuilds
+each game first, and only Omega Ruby and Alpha Sapphire are tested.
+
 Nintendo 3DS games, recompiled ahead of time, running natively on cheap
 Linux handhelds. Made for the R36S and its Mali-G31 GPU under ArkOS.
 
