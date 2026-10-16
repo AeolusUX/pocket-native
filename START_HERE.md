@@ -50,7 +50,7 @@ and is named after its title ID.
 ## Installing
 
 1. Copy the `Pocket Native` folder into `ports` on the card's game
-   partition (`roms/ports`, or `roms2/ports` with two cards).
+   partition (`roms/ports`, or `roms2/ports` with two cards). THIS INCLUDES THE .SH FILES, you should have one .sh file PER GAME
 2. Restart EmulationStation. Each game shows up under Ports.
 
 A tap of FN opens the menu in game and pauses it, FN + Start quits.
