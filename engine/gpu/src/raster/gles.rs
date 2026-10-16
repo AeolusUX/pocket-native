@@ -617,6 +617,34 @@ fn pixel_offset(tiled: bool, x: u32, y: u32, width: u32, bpp: u32) -> usize {
     }
 }
 
+/// the rows first..last of a picture read back from GL, bottom up in RGBA8,
+/// stored in a surface's own layout as encode makes each pixel. a tiled row
+/// goes eight pixels at a time, one row of a tile, their places in it from a
+/// table.
+fn store_rows<const BPP: usize>(data: &[u8], out: &mut [u8], width: u32, height: u32, tiled: bool, rows: (u32, u32), encode: impl Fn([u8; 4]) -> [u8; BPP]) {
+    // x's bits spread to the even places of a tile's Morton order
+    const SPREAD: [usize; 8] = [0, 1, 4, 5, 16, 17, 20, 21];
+    let width = width as usize;
+    for y in rows.0..rows.1 {
+        let source = &data[(height - 1 - y) as usize * width * 4..][..width * 4];
+        if tiled && width.is_multiple_of(8) {
+            let row_base = y as usize / 8 * width * 8 + (SPREAD[y as usize & 7] << 1);
+            for (tile, pixels) in source.as_chunks::<32>().0.iter().enumerate() {
+                let tile_base = row_base + tile * 64;
+                for (i, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
+                    let at = (tile_base + SPREAD[i]) * BPP;
+                    out[at..at + BPP].copy_from_slice(&encode(*pixel));
+                }
+            }
+        } else {
+            for (x, pixel) in source.as_chunks::<4>().0.iter().enumerate() {
+                let at = pixel_offset(tiled, x as u32, y, width as u32, BPP as u32);
+                out[at..at + BPP].copy_from_slice(&encode(*pixel));
+            }
+        }
+    }
+}
+
 const LIGHTING_BASE: usize = 68;
 
 /// what a draw gives back while the program it needs is still compiling, the
@@ -3981,25 +4009,28 @@ impl Gles {
             let s = &self.surfaces[index];
             let bpp = kind.bytes() as usize;
             let mut bytes = vec![0u8; (width * height) as usize * bpp];
-            for y in first..last {
-                for x in 0..width {
-                    let at = (((height - 1 - y) * width + x) * 4) as usize;
-                    let pixel = [data[at], data[at + 1], data[at + 2], data[at + 3]];
-                    match kind {
-                        Kind::Color(format) => {
-                            let out = pixel_offset(tiled, x, y, width, bpp as u32);
-                            format.encode(pixel, &mut bytes[out..out + bpp]);
-                        }
-                        Kind::Depth(sample) => {
+            let rows = (first, last);
+            match kind {
+                Kind::Color(ColorFormat::Rgba8) => store_rows::<4>(&data, &mut bytes, width, height, tiled, rows, |p| [p[3], p[2], p[1], p[0]]),
+                Kind::Color(ColorFormat::Rgb8) => store_rows::<3>(&data, &mut bytes, width, height, tiled, rows, |p| [p[2], p[1], p[0]]),
+                Kind::Color(format) => store_rows::<2>(&data, &mut bytes, width, height, tiled, rows, |p| {
+                    let mut out = [0; 2];
+                    format.encode(p, &mut out);
+                    out
+                }),
+                Kind::Depth(sample) => {
+                    for y in first..last {
+                        for x in 0..width {
+                            let at = (((height - 1 - y) * width + x) * 4) as usize;
                             let out = morton_offset(x, y, width, sample) as usize;
-                            let d24 = u32::from_le_bytes([pixel[0], pixel[1], pixel[2], 0]);
+                            let d24 = u32::from_le_bytes([data[at], data[at + 1], data[at + 2], 0]);
                             match sample {
                                 2 => {
                                     let d16 = ((d24 as u64 * 0xFFFF + 0x7F_FFFF) / 0xFF_FFFF) as u16;
                                     bytes[out..out + 2].copy_from_slice(&d16.to_le_bytes());
                                 }
                                 3 => bytes[out..out + 3].copy_from_slice(&d24.to_le_bytes()[..3]),
-                                _ => bytes[out..out + 4].copy_from_slice(&(d24 | (pixel[3] as u32) << 24).to_le_bytes()),
+                                _ => bytes[out..out + 4].copy_from_slice(&(d24 | (data[at + 3] as u32) << 24).to_le_bytes()),
                             }
                         }
                     }
@@ -4007,7 +4038,10 @@ impl Gles {
             }
             let row = s.row_bytes() as usize;
             memory.write(addr + (first as usize * row) as u32, &bytes[first as usize * row..last as usize * row]);
-            memory.read(addr, &mut bytes);
+            // memory holds what was just written, and around it what was there
+            if (first, last) != (0, height) {
+                memory.read(addr, &mut bytes);
+            }
             let surface = &mut self.surfaces[index];
             surface.shadow = bytes;
             surface.dirty = None;
@@ -4518,5 +4552,42 @@ impl Gles {
             inputs.resize(16, 0);
         }
         (uniforms, inputs, registers.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_rows_match_encoding_each_pixel() {
+        let (width, height) = (24u32, 16u32);
+        let data: Vec<u8> = (0..width * height * 4).map(|i| (i * 37 + i / 7) as u8).collect();
+        for format in [ColorFormat::Rgba8, ColorFormat::Rgb8, ColorFormat::Rgb565, ColorFormat::Rgb5A1, ColorFormat::Rgba4] {
+            let bpp = format.bytes_per_pixel();
+            for tiled in [true, false] {
+                for rows in [(0, height), (3, 11)] {
+                    let mut expected = vec![0u8; (width * height) as usize * bpp];
+                    for y in rows.0..rows.1 {
+                        for x in 0..width {
+                            let at = (((height - 1 - y) * width + x) * 4) as usize;
+                            let out = pixel_offset(tiled, x, y, width, bpp as u32);
+                            format.encode([data[at], data[at + 1], data[at + 2], data[at + 3]], &mut expected[out..out + bpp]);
+                        }
+                    }
+                    let mut stored = vec![0u8; expected.len()];
+                    match bpp {
+                        4 => store_rows::<4>(&data, &mut stored, width, height, tiled, rows, |p| [p[3], p[2], p[1], p[0]]),
+                        3 => store_rows::<3>(&data, &mut stored, width, height, tiled, rows, |p| [p[2], p[1], p[0]]),
+                        _ => store_rows::<2>(&data, &mut stored, width, height, tiled, rows, |p| {
+                            let mut out = [0; 2];
+                            format.encode(p, &mut out);
+                            out
+                        }),
+                    }
+                    assert!(stored == expected, "{format:?}, tiled {tiled}, rows {rows:?}");
+                }
+            }
+        }
     }
 }
