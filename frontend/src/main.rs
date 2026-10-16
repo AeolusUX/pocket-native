@@ -403,7 +403,9 @@ fn main() {
         if next > now {
             std::thread::sleep(next - now);
         } else if now - next > frame * 4 {
-            next = now;
+            // a game this far behind stays four frames behind, so the next
+            // frame still skips, rather than catching up after a long stall
+            next = now - frame * 4;
         }
     }
     read_ahead.save();
