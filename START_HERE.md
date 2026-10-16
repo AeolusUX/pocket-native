@@ -49,9 +49,39 @@ and is named after its title ID.
 
 ## Installing
 
-1. Copy the `Pocket Native` folder into `ports` on the card's game
-   partition (`roms/ports`, or `roms2/ports` with two cards). THIS INCLUDES THE .SH FILES, you should have one .sh file PER GAME
-2. Restart EmulationStation. Each game shows up under Ports.
+The build leaves a folder called `Pocket Native` in `build/`. Inside
+it are two parts, and they have to stay together:
+
+- one `.sh` file per game, named after the game. That file is the
+  launcher, and it is what EmulationStation lists.
+- a folder called `pocket-native`, with the program and the games in
+  it. The launcher starts the copy of `pocket-native` beside it, so
+  neither part works on its own.
+
+1. Copy the whole `Pocket Native` folder, as it is, into `ports` on
+   the card's game partition: `roms/ports`, or `roms2/ports` with two
+   cards. The result should look like this:
+
+   ```
+   roms/ports/Pocket Native/Pokémon Omega Ruby.sh
+   roms/ports/Pocket Native/pocket-native/
+   ```
+
+   Do not copy the `build` folder itself, do not copy just one part,
+   and do not rename anything or move files between the two parts.
+2. Put the card back in the handheld and restart EmulationStation.
+3. Each game shows up under Ports, named after the game, one entry
+   per `.sh` file.
+
+Building another game later adds its `.sh` file and its game files to
+the same output folder. Copy the folder to the card again and let it
+overwrite and merge, so the new game arrives whole.
+
+If a game is missing from Ports, count the `.sh` files where you
+copied the folder: there should be one per game, sitting directly in
+`Pocket Native`, not inside `pocket-native`. If a game is listed but
+does not start, the folder arrived in pieces: delete it from the card
+and copy the whole folder again.
 
 A tap of FN opens the menu in game and pauses it, FN + Start quits.
 Saves and the game's log go in
