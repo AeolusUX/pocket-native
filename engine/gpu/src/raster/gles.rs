@@ -443,8 +443,10 @@ fn drops() -> Arc<Drops> {
     drops()
 }
 
-fn timed(index: usize) -> Timed {
-    Timed(index, std::time::Instant::now())
+/// times a stretch of GL work for ZAKURO_GLES_TIMES, nothing without it.
+fn timed(index: usize) -> Option<Timed> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    ON.get_or_init(|| std::env::var_os("ZAKURO_GLES_TIMES").is_some()).then(|| Timed(index, std::time::Instant::now()))
 }
 
 static WAITS: std::sync::Mutex<Vec<(&'static str, u32)>> = std::sync::Mutex::new(Vec::new());
