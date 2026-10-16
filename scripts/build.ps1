@@ -32,7 +32,7 @@ $image = "pocket-native-build:$hash"
 & $engine image inspect $image 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "== making the build container, once"
-    & $engine build -t $image (Join-Path $repo "scripts\container")
+    & $engine build -f (Join-Path $repo "scripts\container\Containerfile") -t $image (Join-Path $repo "scripts\container")
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
