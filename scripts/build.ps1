@@ -25,6 +25,16 @@ $Out = (Resolve-Path -LiteralPath $Out).Path
 $engine = @("docker", "podman") | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
 if (-not $engine) {
     Write-Host "the build needs Docker Desktop or Podman"
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { exit 1 }
+    $answer = Read-Host "install Docker Desktop with winget now? (y/n)"
+    if ($answer -ne "y") { exit 1 }
+    winget install -e --id Docker.DockerDesktop
+    Write-Host "start Docker Desktop, wait until it is running, then run this script again"
+    exit 1
+}
+& $engine info 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "$engine is not running, start it and run this script again"
     exit 1
 }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repo "scripts\container\Containerfile")).Hash.ToLower().Substring(0, 12)
