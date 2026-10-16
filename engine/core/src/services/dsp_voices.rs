@@ -363,12 +363,22 @@ impl Voice {
     fn mix_into(&mut self, mix: &mut QuadFrame, index: usize) {
         let gains = self.gain[index];
         let from = self.ramp[index].take();
-        if !self.enabled {
+        // most voices reach only the first mix, the rest add nothing
+        if !self.enabled || (from.is_none() && gains == [0.0; 4]) {
             return;
         }
+        let Some(from) = from else {
+            for (out, sample) in mix.iter_mut().zip(&self.frame) {
+                out[0] += (gains[0] * sample[0] as f32) as i32;
+                out[1] += (gains[1] * sample[1] as f32) as i32;
+                out[2] += (gains[2] * sample[0] as f32) as i32;
+                out[3] += (gains[3] * sample[1] as f32) as i32;
+            }
+            return;
+        };
         for (i, (out, sample)) in mix.iter_mut().zip(&self.frame).enumerate() {
             let progress = i as f32 / (FRAME_SAMPLES - 1) as f32;
-            let gain = |c: usize| from.map_or(gains[c], |from| from[c] + (gains[c] - from[c]) * progress);
+            let gain = |c: usize| from[c] + (gains[c] - from[c]) * progress;
             out[0] += (gain(0) * sample[0] as f32) as i32;
             out[1] += (gain(1) * sample[1] as f32) as i32;
             out[2] += (gain(2) * sample[0] as f32) as i32;
