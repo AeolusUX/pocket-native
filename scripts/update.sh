@@ -89,7 +89,7 @@ mkdir -p "$staging"
 for game in "${built[@]}"; do
     mv "$game" "$staging/$(basename "$(dirname "$game")").3ds"
 done
-echo "== building ${#built[@]} games again"
+echo "== building ${#built[@]} game$([ ${#built[@]} = 1 ] || echo s) again"
 status=0
 bash "$repo/scripts/build.sh" "$staging"/*.3ds --out "$out" || status=$?
 restore

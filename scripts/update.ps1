@@ -92,7 +92,7 @@ New-Item -ItemType Directory -Force -Path $staging | Out-Null
 foreach ($game in $built) {
     Move-Item -LiteralPath $game.FullName -Destination (Join-Path $staging "$($game.Directory.Name).3ds")
 }
-Write-Host "== building $($built.Count) games again"
+Write-Host "== building $($built.Count) game$(if ($built.Count -ne 1) { "s" }) again"
 $status = 1
 try {
     $roms = @(Get-ChildItem -LiteralPath $staging -Filter *.3ds | ForEach-Object { $_.FullName })

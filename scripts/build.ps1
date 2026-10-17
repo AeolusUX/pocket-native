@@ -12,13 +12,18 @@ param(
 )
 
 $repo = Split-Path -Parent $PSScriptRoot
+$Host.UI.RawUI.WindowTitle = "Pocket Native"
 
 function Pick($title, $filter, $many) {
     Add-Type -AssemblyName System.Windows.Forms
     $dialog = New-Object System.Windows.Forms.OpenFileDialog -Property @{ Title = $title; Filter = $filter; Multiselect = $many }
     # an owner on top keeps the dialog from opening behind the console
     $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }
-    if ("$($dialog.ShowDialog($owner))" -ne "OK") { return @() }
+    $picked = "$($dialog.ShowDialog($owner))" -eq "OK"
+    $owner.Dispose()
+    # the keyboard goes back to the console, for what the build asks next
+    [void](New-Object -ComObject WScript.Shell).AppActivate("Pocket Native")
+    if (-not $picked) { return @() }
     return $dialog.FileNames
 }
 
