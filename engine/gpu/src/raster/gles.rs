@@ -2860,6 +2860,8 @@ impl Gles {
         let kinds = [Kind::Color(texture.format), depth];
         let tile_rows = 8 * texture.width * Kind::Color(texture.format).bytes();
         let end = texture.addr as u64 + (texture.height / 8 * tile_rows) as u64;
+        static FROM_MEMORY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let past = !*FROM_MEMORY.get_or_init(|| crate::switch("ZAKURO_NO_PAST_DRAWING", "textures past a drawing read from memory"));
         (0..self.surfaces.len())
             .filter(|&i| {
                 let s = &self.surfaces[i];
@@ -2872,7 +2874,7 @@ impl Gles {
                         // last row past it unless another drawing is there
                         let below = s.addr as u64 + s.size() as u64;
                         row + texture.height <= s.height
-                            || (matches!(s.kind, Kind::Color(_)) && row < s.height && !self.surfaces.iter().any(|o| o.dirty.is_some() && below < o.addr as u64 + o.size() as u64 && (o.addr as u64) < end))
+                            || (past && matches!(s.kind, Kind::Color(_)) && row < s.height && !self.surfaces.iter().any(|o| o.dirty.is_some() && below < o.addr as u64 + o.size() as u64 && (o.addr as u64) < end))
                     })
                 }
             })

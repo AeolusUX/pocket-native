@@ -127,6 +127,7 @@ gpu_transfers = true      # display transfers on the GPU, false for the CPU
 gpu_texture_copies = true # textures the game drew copied on the GPU, false
                           # reads them back from memory
 in_place = true           # drawn textures sampled in place
+past_drawing = true       # a texture past a drawing repeats its edge
 etc1 = true               # compressed textures
 generic_shaders = false
 generic_lighting = false

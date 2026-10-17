@@ -51,7 +51,7 @@ const ON_OFF: [&str; 2] = ["Off", "On"];
 /// the advanced settings that turn on and off, see settings::Advanced: the
 /// name, the setting, what off and on show as, and the help under the list.
 #[allow(clippy::type_complexity)]
-const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 30] = [
+const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 31] = [
     ("Bottom screen skipping", |a| &mut a.skip_bottom, ON_OFF, "Draws the bottom screen less often while it stands still. Try Off if it flickers, lags or goes black."),
     ("Speed hacks", |a| &mut a.fast, ON_OFF, "Turns the ten speed hacks below on or off together. Off is the first thing to try when a game looks wrong."),
     ("Quick surface checks", |a| &mut a.quick_checks, ON_OFF, "Checks pictures against memory at a few spots only. Try Off if old pictures or garbage stay after a scene change."),
@@ -69,6 +69,7 @@ const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 30] = [
     ("Display transfers", |a| &mut a.gpu_transfers, ["CPU", "GPU"], "How pictures reach the screens. Try CPU for garbage, wrong colors or the wrong picture on a screen."),
     ("Drawn texture copies", |a| &mut a.gpu_texture_copies, ["Memory", "GPU"], "Pictures a game draws and reuses as textures. Try Memory if it crashes or freezes, or for wrong reflections."),
     ("Drawn textures in place", |a| &mut a.in_place, ON_OFF, "Reads those pictures without copying them. Try Off for upside-down or shifted effects."),
+    ("Textures past a drawing", |a| &mut a.past_drawing, ON_OFF, "Fills a texture bigger than its picture with the picture's edge. Try Off for streaks or missing glow."),
     ("Compressed textures", |a| &mut a.etc1, ON_OFF, "Leaves compressed textures to the GPU. Try Off for blocky or wrongly colored textures."),
     ("Generic shaders", |a| &mut a.generic_shaders, ON_OFF, "One program for every draw rather than one each. Slower to draw, but nothing new to build. Try On for hitches."),
     ("Generic lighting", |a| &mut a.generic_lighting, ON_OFF, "The same for lit draws only. Try On for hitches when lights change."),

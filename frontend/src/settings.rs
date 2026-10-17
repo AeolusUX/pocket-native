@@ -127,6 +127,9 @@ pub struct Advanced {
     pub gpu_texture_copies: bool,
     /// a drawn texture that is a whole surface sampled where it is.
     pub in_place: bool,
+    /// a texture running past the drawing under it taken from the drawing,
+    /// its last row repeated, rather than from memory.
+    pub past_drawing: bool,
     /// ETC1 textures kept compressed for the GPU.
     pub etc1: bool,
     pub generic_shaders: bool,
@@ -172,6 +175,7 @@ impl Default for Advanced {
             gpu_transfers: true,
             gpu_texture_copies: true,
             in_place: true,
+            past_drawing: true,
             etc1: true,
             generic_shaders: false,
             generic_lighting: false,
@@ -205,6 +209,7 @@ impl Advanced {
             fast: false,
             gpu_texture_copies: false,
             in_place: false,
+            past_drawing: false,
             draw_ranges: false,
             exact_events: true,
             background_shaders: false,
@@ -237,6 +242,7 @@ impl Advanced {
             ("ZAKURO_CPU_TRANSFERS", !self.gpu_transfers),
             ("ZAKURO_NO_GPU_TEXTURES", !self.gpu_texture_copies),
             ("ZAKURO_NO_IN_PLACE", !self.in_place),
+            ("ZAKURO_NO_PAST_DRAWING", !self.past_drawing),
             ("ZAKURO_NO_ETC1", !self.etc1),
             ("ZAKURO_GENERIC_SHADERS", self.generic_shaders),
             ("ZAKURO_GENERIC_LIGHTING", self.generic_lighting),
