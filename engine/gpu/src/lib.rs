@@ -264,6 +264,10 @@ pub struct Gpu {
     /// display transfers that would show them, for a frontend that cannot
     /// show them in time, a frame at a time from its first draw.
     pub skip_draws: bool,
+    /// the frame skips only because the panel will not show it, which
+    /// leaves the bottom screen drawn: some titles draw it only in the
+    /// frames between their top pictures.
+    keep_bottom: bool,
     /// whether the title sent a picture to the top screen this frame, and
     /// in the two frames before it.
     top_sent: bool,
@@ -369,6 +373,7 @@ impl Gpu {
             shown: 0,
             vertices_drawn: 0,
             skip_draws: false,
+            keep_bottom: false,
             top_sent: false,
             top_sent_before: [false; 2],
             skipping: false,
@@ -513,7 +518,7 @@ impl Gpu {
         }
         // a skipped frame leaves the screens as they are, where a fill over
         // one would clear it for draws that never come
-        if self.skip_draws && self.on_screen(memory, start, end - start).is_some() {
+        if self.skip_draws && self.on_screen(memory, start, end - start).is_some_and(|(screen, _)| screen == 0 || !self.keep_bottom) {
             self.fills += 1;
             return;
         }
@@ -1118,6 +1123,7 @@ impl Gpu {
         self.top_sent_before = [self.top_sent_before[1], self.top_sent];
         self.top_sent = false;
         self.skip_draws = behind || (unshown && self.top_sent_before == [true, true]);
+        self.keep_bottom = !behind;
     }
 
     fn right_eye_off(&mut self, why: &str) {
@@ -1142,10 +1148,11 @@ impl Gpu {
         let screen = if height == 320.0 { 1 } else if height == 400.0 { 2 } else { 0 };
         if !self.drawing {
             self.drawing = true;
-            if self.skip_draws {
+            let skip_draws = self.skip_draws && !(screen == 1 && self.keep_bottom);
+            if skip_draws {
                 self.skipped_at = self.transfers;
             }
-            (self.screens_drawn, self.skipping_frame) = (screen, self.skip_draws);
+            (self.screens_drawn, self.skipping_frame) = (screen, skip_draws);
             let target = self.internal[REG_COLOR_BUFFER_ADDRESS] << 3;
             self.right_eye_candidate = screen == 2 && self.stereo && !self.right_eye_wrong && self.left_eye == Some(target);
             let right_eye = self.right_eye_candidate && fast() && self.skip_right_eye && self.right_eye_seen >= 4;
@@ -1154,7 +1161,7 @@ impl Gpu {
             }
             self.period_target = target;
             self.skipped_bottom = screen == 1 && self.skips_bottom();
-            self.skipping = self.skip_draws || right_eye || self.skipped_bottom;
+            self.skipping = skip_draws || right_eye || self.skipped_bottom;
             self.skipped_targets.clear();
         } else if self.screens_drawn | screen != self.screens_drawn {
             self.screens_drawn |= screen;
