@@ -145,7 +145,7 @@ fn main() {
             });
         }
         if let Some(skip) = skip {
-            system.skip_frames(frame % (skip + 1) != 0);
+            system.skip_frames(frame % (skip + 1) != 0, false);
         }
         let frame_start = std::time::Instant::now();
         let faults = system.memory.fault_summary().len();

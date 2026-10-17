@@ -109,6 +109,7 @@ menu.
 skip_bottom = true        # bottom screen skipping
 skip_right_eye = true     # the right eye's picture left out, 3D being off
 frame_skip = 3            # most frames skipped in a row, 0 to 3
+shown_only = false        # frames the frame cap hides left undrawn
 fast = true               # speed hacks, which the next ten need
 quick_checks = true       # surfaces checked against memory from a few spots
 half_precision = true     # fragment colors at half precision

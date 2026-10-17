@@ -89,7 +89,8 @@ pub struct GameSettings {
 }
 
 /// the engine's speed hacks, each of which a game may not get along with. all
-/// but skip_bottom and frame_skip take effect when the game starts.
+/// but skip_bottom, frame_skip and shown_only take effect when the game
+/// starts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Advanced {
@@ -99,6 +100,9 @@ pub struct Advanced {
     pub skip_right_eye: bool,
     /// most pictures skipped in a row to keep up.
     pub frame_skip: u32,
+    /// the frames the frame cap leaves unshown not drawn, in a game that
+    /// makes a picture every frame.
+    pub shown_only: bool,
     /// the speed hacks, which the ones after it need.
     pub fast: bool,
     pub quick_checks: bool,
@@ -151,6 +155,7 @@ impl Default for Advanced {
             skip_bottom: true,
             skip_right_eye: true,
             frame_skip: 3,
+            shown_only: false,
             fast: true,
             quick_checks: true,
             half_precision: true,
@@ -196,6 +201,7 @@ impl Advanced {
         Advanced {
             skip_bottom: false,
             skip_right_eye: false,
+            shown_only: false,
             fast: false,
             gpu_texture_copies: false,
             in_place: false,

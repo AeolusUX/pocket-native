@@ -162,6 +162,7 @@ fn main() {
     let mut held = HashSet::new();
     let fixed_skip: Option<u32> = std::env::var("ZAKURO_FRAMESKIP").ok().and_then(|value| value.parse().ok());
     let mut most_skipped = fixed_skip.unwrap_or(advanced.frame_skip);
+    let mut shown_only = advanced.shown_only;
     let mut skipped = 0;
     // interpolation waits for a second without skipping, it has no time then
     let mut last_skip = 0u64;
@@ -235,7 +236,8 @@ fn main() {
                 Action::Redraw => menu_drawn = false,
                 Action::Changed => {
                     apply_options(&mut system, &game, &profile, &base_drops);
-                    most_skipped = fixed_skip.unwrap_or(Advanced::of(&game, &profile).frame_skip);
+                    let advanced = Advanced::of(&game, &profile);
+                    (most_skipped, shown_only) = (fixed_skip.unwrap_or(advanced.frame_skip), advanced.shown_only);
                     apply_power(settings.power);
                     menu_drawn = false;
                 }
@@ -285,7 +287,11 @@ fn main() {
             last_skip = frame_number;
         }
         let interpolating = settings.interpolate_to > 0 && frame_number > last_skip + 60;
-        system.skip_frames(skip);
+        // a frame the panel will not show, which a title making a picture
+        // every frame need not draw
+        let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
+        let unshown = shown_only && probe.is_none() && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
+        system.skip_frames(skip, unshown);
         let (buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings) };
         let step = input::cursor_step(settings.touch_speed);
         cursor.0 = (cursor.0 + input::stick(axes[3]) * step).clamp(0.0, 319.0);
@@ -364,7 +370,6 @@ fn main() {
         if !skip {
             rendered += 1;
         }
-        let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
         let every = if interpolating { 60 / settings.interpolate_to as u64 } else { (60.0 / cap).ceil().max(1.0) as u64 };
         if !skip && frame_number >= presented + every {
             presented = frame_number;

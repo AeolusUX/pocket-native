@@ -766,9 +766,10 @@ impl System {
             .is_some_and(|queue| queue.pending.load(Ordering::Acquire) > 0 || queue.finished.load(Ordering::Acquire) > 0)
     }
 
-    /// skips the frames the title draws from now on, or stops skipping.
-    pub fn skip_frames(&mut self, skip: bool) {
-        self.gpu_work(&[], move |gpu, _, _| gpu.skip_draws = skip);
+    /// skips the frame about to run when the frontend is behind, or when
+    /// it will not be shown and the title makes a picture every frame.
+    pub fn skip_frames(&mut self, behind: bool, unshown: bool) {
+        self.gpu_work(&[], move |gpu, _, _| gpu.next_frame(behind, unshown));
     }
 
     /// draws the bottom screen with every picture while it changes, rather

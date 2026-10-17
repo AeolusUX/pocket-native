@@ -264,6 +264,10 @@ pub struct Gpu {
     /// display transfers that would show them, for a frontend that cannot
     /// show them in time, a frame at a time from its first draw.
     pub skip_draws: bool,
+    /// whether the title sent a picture to the top screen this frame, and
+    /// in the two frames before it.
+    top_sent: bool,
+    top_sent_before: [bool; 2],
     skipping: bool,
     drawing: bool,
     /// in fast mode, what the command lists since the last display transfer
@@ -365,6 +369,8 @@ impl Gpu {
             shown: 0,
             vertices_drawn: 0,
             skip_draws: false,
+            top_sent: false,
+            top_sent_before: [false; 2],
             skipping: false,
             drawing: false,
             picture_hash: 0,
@@ -641,8 +647,11 @@ impl Gpu {
                 self.left_eye = Some(self.period_target);
             }
         }
-        if !self.skipping && shown_on == Some(0) {
-            self.top_pictures += 1;
+        if shown_on == Some(0) {
+            self.top_sent = true;
+            if !self.skipping {
+                self.top_pictures += 1;
+            }
         }
         if fast() && shown_on == Some(1) {
             self.bottom_hashes = [self.picture_hash, self.bottom_hashes[0]];
@@ -1098,6 +1107,17 @@ impl Gpu {
             (overlap > 0).then_some(((overlap, given), (screen, buffer)))
         });
         overlaps.max_by_key(|&(key, _)| key).map(|(_, found)| found)
+    }
+
+    /// a frame of the title's begins, skipped when the frontend is behind,
+    /// or when the panel will not show it and the title sent a top picture
+    /// in each of the two frames before: drawing every other frame of a title
+    /// that makes one a frame loses nothing shown, one that makes one every
+    /// other frame never sends two in a row.
+    pub fn next_frame(&mut self, behind: bool, unshown: bool) {
+        self.top_sent_before = [self.top_sent_before[1], self.top_sent];
+        self.top_sent = false;
+        self.skip_draws = behind || (unshown && self.top_sent_before == [true, true]);
     }
 
     fn right_eye_off(&mut self, why: &str) {
