@@ -2,8 +2,7 @@
 
 If you have not used it before, [start here](START_HERE.md). The short
 version: there is no app to install and no game included, a PC rebuilds
-each game first (drop it on `Build a game`), and only Omega Ruby and
-Alpha Sapphire are tested.
+each game first (drop it on `Build a game`).
 
 Nintendo 3DS games, recompiled ahead of time, running natively on cheap
 Linux handhelds. Made for the R36S and its Mali-G31 GPU under ArkOS.
@@ -75,11 +74,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.3ds
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.cia -Keys path\to\aes_keys.txt
 ```
 
-Several games can be given at once.
+Several games can be built at once.
 
-Docker Desktop has to be running. The Windows build keeps its scratch space
-in a Docker volume, `pocket-native-work`; `docker volume rm
-pocket-native-work` frees it.
+Docker Desktop has to be running.
 
 The first build sets up the build container, which downloads a few hundred
 MB (Ubuntu packages, Rust, crates) and takes a while. Each game's code is

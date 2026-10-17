@@ -1,4 +1,5 @@
 name = "Animal Crossing: New Leaf"
 
+# culling makes the trees flicker
 [advanced]
 cull = false
