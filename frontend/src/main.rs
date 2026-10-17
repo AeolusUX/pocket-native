@@ -6,8 +6,8 @@
 //!
 //! A tap of FN opens the menu, FN+Start quits, a tap of L2 or FN+L1 swaps
 //! the screens, FN+R1 shows both or one big, the right stick moves the touch
-//! cursor and R2 touches, or tilts the console with L2 held. Reset in the menu exits with 3, for the launcher to start the
-//! game again.
+//! cursor and R2 touches, or tilts the console with L2 held. Reset in the
+//! menu exits with 3, for the launcher to start the game again.
 //!
 //! pocket-native --probe <rom> [frames] tries a game as fast as it runs and
 //! writes a report of how it went, see probe.rs.

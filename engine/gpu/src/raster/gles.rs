@@ -988,14 +988,13 @@ extern "C" fn flipped(_fd: i32, sequence: u32, seconds: u32, microseconds: u32, 
     FLIPPED_TIME.store(seconds as u64 * 1_000_000 + microseconds as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// the panel's refresh period, and how long before the refresh it went up
-/// at the last picture was handed to it, both in nanoseconds, the second
-/// taken once. 0 while there is no panel or nothing new.
+/// the panel's refresh period, and how long before its refresh the last
+/// picture was handed over, in nanoseconds, 0 when not known.
 static PANEL_PERIOD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PANEL_SLACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// the panel's refresh period, and how long before the refresh it went up
-/// the last picture reached it, if a new one did since the last call.
+/// the panel's refresh period, and how long before its refresh the last
+/// picture was handed over, when one was since the last call.
 pub fn panel_timing() -> Option<(std::time::Duration, Option<std::time::Duration>)> {
     let period = PANEL_PERIOD.load(std::sync::atomic::Ordering::Relaxed);
     let slack = PANEL_SLACK.swap(0, std::sync::atomic::Ordering::Relaxed);
