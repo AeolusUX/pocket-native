@@ -268,6 +268,18 @@ fn help(field: Field, profile: &Profile) -> &str {
     }
 }
 
+/// text cut short with "..." to be no wider than width.
+fn shortened(canvas: &Canvas, face: usize, text: &str, width: f32) -> String {
+    let mut text = text.to_owned();
+    if canvas.measure(face, &text) <= width {
+        return text;
+    }
+    while !text.is_empty() && canvas.measure(face, &format!("{}...", text.trim_end())) > width {
+        text.pop();
+    }
+    format!("{}...", text.trim_end())
+}
+
 /// text broken into lines no wider than width.
 fn wrap(canvas: &Canvas, face: usize, text: &str, width: f32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -363,7 +375,15 @@ impl Menu {
         canvas.outline([x0, y0, x1, y1], 2.0, rgba(EDGE, 255));
         let (heading, state) = if self.page == Page::Advanced { ("Advanced", "This game") } else { ("Pocket Native", "Paused") };
         canvas.text(BIG, heading, x0 + 14.0, y0 + 7.0, rgba(TEXT, 255), false);
-        canvas.text(SMALL, &format!("{title} · {state}"), x1 - 14.0, y0 + 9.0, rgba(DIM, 255), true);
+        let mut left = x0 + 14.0 + canvas.measure(BIG, heading) + 16.0;
+        if self.page == Page::Main {
+            let version = concat!("v", env!("CARGO_PKG_VERSION"));
+            canvas.text(SMALL, version, left - 8.0, y0 + 9.0, rgba(DIM, 255), false);
+            left += canvas.measure(SMALL, version);
+        }
+        let state = format!(" · {state}");
+        let title = shortened(canvas, SMALL, title, x1 - 14.0 - left - canvas.measure(SMALL, &state));
+        canvas.text(SMALL, &format!("{title}{state}"), x1 - 14.0, y0 + 9.0, rgba(DIM, 255), true);
 
         // the headings and fields from the top of the list, scrolled to keep
         // the selected field in view
@@ -528,6 +548,16 @@ mod tests {
             })
             .collect();
         assert!(long.is_empty(), "{long:#?}");
+    }
+
+    #[test]
+    fn a_long_name_is_cut_short_to_fit() {
+        let font = Font::load();
+        let canvas = Canvas::new(&font, (640, 480));
+        let name = "Mario & Luigi: Bowser's Inside Story + Bowser Jr.'s Journey";
+        let short = shortened(&canvas, SMALL, name, 200.0);
+        assert!(short.ends_with("...") && canvas.measure(SMALL, &short) <= 200.0, "{short}");
+        assert_eq!(shortened(&canvas, SMALL, "Pokémon Omega Ruby", 200.0), "Pokémon Omega Ruby");
     }
 
     /// and so does the help of every profile's options.
