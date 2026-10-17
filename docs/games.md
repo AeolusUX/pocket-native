@@ -44,6 +44,10 @@ The number is how many frames to run. 3600 is a minute of the console's
 time. The program exits with 1 if the game faulted. With
 `ZAKURO_PROBE_SPEED=0.6` it skips frames the way a handheld running at 60%
 speed would, which shows up frame skip problems on a fast PC.
+`ZAKURO_INPUT=frame:BUTTON,...` presses buttons on given frames in place of
+the probe's own mashing (`120:A,240:START+A`, each held for six frames), and
+`ZAKURO_CLOCK=` a number of milliseconds pins the console's clock and the
+random numbers it hands out, so two runs make the same choices.
 
 The warnings and errors are the useful part. They name the services,
 commands and GPU features the game needed that the emulator lacks. Please

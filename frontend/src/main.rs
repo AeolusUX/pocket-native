@@ -291,7 +291,7 @@ fn main() {
         cursor.0 = (cursor.0 + input::stick(axes[3]) * step).clamp(0.0, 319.0);
         cursor.1 = (cursor.1 + input::stick(axes[4]) * step).clamp(0.0, 239.0);
         let touching = keys.contains(&R2) || keys.contains(&R3);
-        if probe.is_some() {
+        if probe.is_some() && script.is_empty() {
             system.set_input(InputState { buttons: probe::Probe::buttons(frame_number), ..Default::default() });
         } else if script.is_empty() {
             system.set_input(InputState { buttons, circle_x, circle_y, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)) });

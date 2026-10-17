@@ -115,7 +115,8 @@ pub fn handle_request(system: &mut System, target: Target) {
         } else if name == "ssl:C" && header.command_id() == 0x0011 {
             let size = buffer.get(&mut system.memory, 1) as usize;
             let (descriptor, addr) = (buffer.get(&mut system.memory, 2), buffer.get(&mut system.memory, 3));
-            let mut state = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64) | 1;
+            let pinned = std::env::var("ZAKURO_CLOCK").ok().and_then(|clock| clock.parse::<u64>().ok());
+            let mut state = pinned.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64)) | 1;
             let random: Vec<u8> = (0..size)
                 .map(|_| {
                     state ^= state << 13;

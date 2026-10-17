@@ -80,6 +80,10 @@ pub fn init_shared_page(page: &mut [u8], model: ConsoleModel, slider_3d: f32, cl
 
 /// the host's local time, in milliseconds since 1900.
 pub fn host_clock() -> u64 {
+    // ZAKURO_CLOCK pins it, for runs that have to repeat
+    if let Some(clock) = std::env::var("ZAKURO_CLOCK").ok().and_then(|clock| clock.parse().ok()) {
+        return clock;
+    }
     let unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
