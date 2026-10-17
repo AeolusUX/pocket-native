@@ -1,61 +1,70 @@
 # Start here
 
 Pocket Native does not work like an emulator. There is no app to install
-on the handheld and no game included. A PC rebuilds one of your own game
-dumps at a time into a folder for the SD card, and that is the part most
-people miss.
+on the handheld and no game included. A PC rebuilds your own game dumps
+into a folder for the SD card, and that is the part most people miss.
+
+The whole thing in one line: download the kit, drop your game on
+`Build a game`, and copy the folder it makes to the card.
 
 Only Pokémon Omega Ruby and Alpha Sapphire have been tested and tuned.
 Other games may or may not boot.
 
 ## What you need
 
-- An R36S (or a close clone) with ArkOS. Other systems, dArkOS and
-  dArkOSRE included, are untested.
-- A PC for the build: Linux with podman or Docker, or Windows with
-  Docker Desktop or Podman Desktop. On Windows it has to be running
-  before you start.
+- An R36S (or a close clone) with ArkOS. dArkOSRE works too. Other
+  systems, dArkOS included, are untested.
+- A PC for the build, with Windows or Linux:
+  - Windows: Docker Desktop or Podman Desktop, running before you
+    start. If neither is installed, the build offers to install Docker
+    Desktop for you.
+  - Linux: podman or Docker.
 - Your own dump of the game: a decrypted `.3ds`/`.cci`, or a `.cia`
   along with your console's `aes_keys.txt`.
+
+## Getting the kit
+
+Open the [latest release](https://github.com/whovian64/pocket-native/releases/latest),
+download **Source code (zip)** under Assets, and unzip it somewhere with
+a few GB to spare. The folder you get is the kit, and everything below
+happens in it. You only do this once: later versions come in through
+the updater.
 
 ## Building
 
 On Windows, drag your game onto `Build a game.bat` in the kit's folder,
-or double-click it and pick the game. Several games can go at once. A
-`.cia` needs your console's `aes_keys.txt`: put it next to the game or
-in the kit's folder and the build finds it, otherwise it asks for it.
+or double-click it and pick the game. On Linux, do the same with
+`Build a game`. Several games can go at once. The first time, Windows or
+the file manager may ask whether to run it, see below if it does.
 
-On Linux, it's the same with `Build a game` in the kit's folder: drop
-your games on it, or open it and pick them. The first time, the file
-manager may ask whether to trust or run it. From a terminal, in the kit's
-folder:
+A `.cia` needs your console's `aes_keys.txt`. Put it next to the game
+or in the kit's folder and the build finds it, otherwise it asks for it.
+
+A window shows the build as it goes and stays open at the end, so you
+can read how it went. The first build sets up the build container,
+which downloads a few hundred MB and takes a while. Each game's code is
+recompiled, which takes several minutes for a big game. Later builds
+reuse what they can.
+
+The result is a `Pocket Native` folder in the kit's `build` folder.
+Building more games adds them to it, one launcher each. A game with no
+profile yet builds with `(no profile yet)` after its name and is named
+after its title ID.
+
+From a terminal, in the kit's folder, the same build is:
 
 ```bash
 scripts/build.sh path/to/game.3ds
 ```
 
-With a `.cia`, if its `aes_keys.txt` is not next to it or in the kit's
-folder:
-
-```bash
-scripts/build.sh path/to/game.cia --keys path/to/aes_keys.txt
-```
-
-Several games can be given at once here too.
-
-The first build sets up the build container, which downloads a few
-hundred MB and takes a while. Each game's code is recompiled, which
-takes several minutes for a big game. Later builds reuse what they can.
-
-The result is a `Pocket Native` folder in `build/`. Building more games
-into the same folder adds them next to each other, one launcher each. A
-game with no profile yet builds with `(no profile yet)` after its name
-and is named after its title ID.
+and `scripts\build.ps1` in PowerShell on Windows. Both take several
+games at once, and `--keys path/to/aes_keys.txt` (`-Keys` on Windows)
+for a `.cia` whose keys are elsewhere.
 
 ## Installing
 
-The build leaves a folder called `Pocket Native` in `build/`. Inside
-it are two parts, and they have to stay together:
+The build leaves a folder called `Pocket Native` in `build`. Inside it
+are two parts, and they have to stay together:
 
 - one `.sh` file per game, named after the game. That file is the
   launcher, and it is what EmulationStation lists.
@@ -95,23 +104,39 @@ Saves and the game's log go in
 ## Updating
 
 When a new version is out, the build says so when it finishes. Open
-`Update Pocket Native` in the kit's folder (`Update Pocket Native.bat` on
-Windows), or run `scripts/update.sh`.
-It downloads the new version into the kit, keeps the kit's old files in
-`.old`, and builds every game in `build/` again, so you don't need your
-game files for it. Then copy the `Pocket Native` folder onto the card
-again, over the old one. Your saves stay where they are.
+`Update Pocket Native` in the kit's folder (`Update Pocket Native.bat`
+on Windows). It downloads the new version into the kit, keeps the old
+files in `.old`, and builds every game in `build` again from the copies
+the last build kept there, so you don't need your game files for it.
+Then copy the `Pocket Native` folder onto the card again, over the old
+one. Your saves stay where they are.
 
-The menu shows which version a game was built with, next to "Pocket
-Native" at the top.
+The menu shows which version you are running, next to "Pocket Native"
+at the top.
+
+Coming from 0.1.0 or 0.1.1, which have no updater yet: get the new kit
+as above, build your games with it, and copy the folder over the old
+one on the card. From then on the updater does it.
 
 ## If it goes wrong
 
+**Windows says it protected your PC, or asks whether to run the file.**
+It does that for files that came from the internet. Click **More info**
+and then **Run anyway**, or **Run**.
+
+**Nothing happens when you open `Build a game` on Linux.** The file
+manager does not run launchers it does not trust. Allow it when it
+asks, or in the file's properties (allow executing, or allow
+launching), or run `scripts/build.sh` from a terminal instead.
+
 **The build says the image is encrypted.** The dump has to be decrypted
-first, or built from the `.cia` with `--keys` instead.
+first, or built from the `.cia` with its `aes_keys.txt` instead.
 
 **The Windows build cannot reach Docker.** Docker Desktop is not
 running. Start it, let it finish starting, and run the build again.
+
+**The update says it could not reach GitHub.** Check the PC's internet
+connection and try again, or get the new kit by hand as above.
 
 **The game is not under Ports.** The folder is in the wrong place, or
 EmulationStation has not been restarted. The whole `Pocket Native`
@@ -122,11 +147,13 @@ not show up, your system may only list launchers sitting directly in
 
 **A black screen with choppy sound, and FN pauses but shows no menu.**
 The handheld's GPU did not start, so the game is drawing in software,
-far too slowly to show anything. No setting fixes that. Older builds
-did this on dArkOS and dArkOSRE, so build the game again with the
+far too slowly to show anything. No setting fixes that. Builds before
+0.1.1 did this on dArkOS and dArkOSRE, so build the game again with the
 current version. If it still happens, the game's `log.txt` has a line
 with `could not initialize EGL`, please post it in an issue.
 
 **A game other than Omega Ruby or Alpha Sapphire does not start, or
 runs badly.** That is expected for now. Its `log.txt`, in the game's
-`data` folder above, says what the emulator ran into.
+`data` folder above, says what the emulator ran into. Most games have
+something worth trying first: open the menu, go to **Advanced
+settings**, pick **Most compatible**, then **Restart game**.

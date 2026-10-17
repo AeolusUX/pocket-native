@@ -6,7 +6,8 @@ is specific to one game: a game without a profile simply runs without one.
 
 ## Building it
 
-Build it the same way as any other game:
+Build it the same way as any other game, by dropping it on `Build a game`
+or with:
 
 ```bash
 scripts/build.sh path/to/game.3ds

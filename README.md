@@ -2,7 +2,8 @@
 
 If you have not used it before, [start here](START_HERE.md). The short
 version: there is no app to install and no game included, a PC rebuilds
-each game first, and only Omega Ruby and Alpha Sapphire are tested.
+each game first (drop it on `Build a game`), and only Omega Ruby and
+Alpha Sapphire are tested.
 
 Nintendo 3DS games, recompiled ahead of time, running natively on cheap
 Linux handhelds. Made for the R36S and its Mali-G31 GPU under ArkOS.
@@ -19,8 +20,10 @@ JIT, and it does the heavy lifting here. This fork adds:
 - an in-game menu for layout, frame rate, power, controls and per-game
   settings, with a line of help for every setting
 - per-game profiles in `titles/`, and a probe mode for trying new games
-- a one-command build that turns your own game dump into a folder for the
-  SD card
+- a build that turns your own game dump into a folder for the SD card:
+  drop the game on `Build a game`, on Windows or Linux
+- an updater that brings the kit up to the latest release and builds
+  your games again with it
 
 The Android app and the Vulkan renderer of upstream Zakuro are not part of
 this fork.
@@ -33,8 +36,8 @@ trying a game and adding a profile for it.
 
 ## What you need
 
-- An R36S (or a close clone) with ArkOS. Other systems, dArkOS and
-  dArkOSRE included, are untested.
+- An R36S (or a close clone) with ArkOS. dArkOSRE works too. Other
+  systems, dArkOS included, are untested.
 - A PC for the build: Linux with [podman](https://podman.io) or Docker, or
   Windows with [Docker Desktop](https://www.docker.com/products/docker-desktop/)
   or [Podman Desktop](https://podman-desktop.io).
@@ -46,21 +49,21 @@ you dump from your own console.
 
 ## Building
 
+Get the kit from the [latest release](https://github.com/whovian64/pocket-native/releases/latest)
+(**Source code**), or clone the repository. Then drop your games on
+`Build a game` in the kit's folder, or open it and pick them:
+`Build a game.bat` on Windows, `Build a game.desktop` on Linux. A `.cia`
+uses the `aes_keys.txt` next to it or in the kit's folder, and asks for
+it otherwise.
+
+From a terminal:
+
 ```bash
 scripts/build.sh path/to/game.3ds
-```
-
-With a `.cia`, if its `aes_keys.txt` is not next to it or in the kit's
-folder:
-
-```bash
 scripts/build.sh path/to/game.cia --keys path/to/aes_keys.txt
 ```
 
-Games can also be dropped on `Build a game` in the kit's folder, or picked
-when it is opened: `Build a game.desktop` on Linux, `Build a game.bat` on
-Windows. The Windows one runs `scripts\build.ps1`, which takes the same
-arguments from PowerShell:
+On Windows, `scripts\build.ps1` takes the same from PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.3ds
@@ -84,11 +87,13 @@ them next to each other, one launcher each.
 
 ## Updating
 
-A build ends by saying when a newer release is out. `scripts/update.sh`, or
-`Update Pocket Native` in the kit's folder, downloads it into the kit, moves the
-kit's old files to `.old`, and builds every game in `build/` again from the
-copies the last build left there. A git clone is updated with `git pull`
-instead. `--out`/`-Out` points it at another output folder.
+A build ends by saying when a newer release is out. `Update Pocket Native`
+in the kit's folder, or `scripts/update.sh` (`scripts\update.ps1` on
+Windows), downloads it into the kit, moves the kit's old files to `.old`,
+and builds every game in `build/` again from the copies the last build
+left there. A git clone is updated with `git pull` instead. `--out`/`-Out`
+points it at another output folder. The menu shows the version running,
+next to "Pocket Native" at the top.
 
 ## Installing
 
