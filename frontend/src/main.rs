@@ -152,7 +152,7 @@ fn main() {
     let mut fn_alone = false;
     let mut exit_code = 0;
 
-    let frame = Duration::from_secs_f64(1.0 / 60.0);
+    let mut frame = Duration::from_secs_f64(1.0 / 60.0);
     let mut next = Instant::now();
     // ZAKURO_FPS_CAP=n shows the screens at most n times a second whatever
     // the menu says, counted in the title's 60 frames
@@ -403,6 +403,17 @@ fn main() {
         next += frame;
         if probe.is_some() {
             continue;
+        }
+        // a frame lasts as long as the panel's refresh, and the frames move
+        // to hand the panel its pictures halfway between two refreshes, where
+        // a little late or early does not hold one up a refresh longer
+        if let Some((period, slack)) = zakuro_gpu::panel_timing() {
+            frame = period;
+            if let Some(slack) = slack.filter(|_| !behind) {
+                let error = slack.as_secs_f64() - period.as_secs_f64() / 2.0;
+                let nudge = Duration::from_secs_f64((error.abs() / 4.0).min(0.001));
+                next = if error > 0.0 { next + nudge } else { next - nudge };
+            }
         }
         let now = Instant::now();
         if next > now {

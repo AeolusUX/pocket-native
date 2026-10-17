@@ -978,7 +978,36 @@ struct DrmEventContext {
     page_flip_handler: Option<FlipHandler>,
 }
 
-extern "C" fn flipped(_fd: i32, _sequence: u32, _seconds: u32, _microseconds: u32, _data: *mut c_void) {}
+/// the panel's refresh count and the time of it, in microseconds of the
+/// monotonic clock, at the last flip.
+static FLIPPED_AT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static FLIPPED_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+extern "C" fn flipped(_fd: i32, sequence: u32, seconds: u32, microseconds: u32, _data: *mut c_void) {
+    FLIPPED_AT.store(sequence, std::sync::atomic::Ordering::Relaxed);
+    FLIPPED_TIME.store(seconds as u64 * 1_000_000 + microseconds as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// the panel's refresh period, and how long before the refresh it went up
+/// at the last picture was handed to it, both in nanoseconds, the second
+/// taken once. 0 while there is no panel or nothing new.
+static PANEL_PERIOD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PANEL_SLACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// the panel's refresh period, and how long before the refresh it went up
+/// the last picture reached it, if a new one did since the last call.
+pub fn panel_timing() -> Option<(std::time::Duration, Option<std::time::Duration>)> {
+    let period = PANEL_PERIOD.load(std::sync::atomic::Ordering::Relaxed);
+    let slack = PANEL_SLACK.swap(0, std::sync::atomic::Ordering::Relaxed);
+    (period > 0).then(|| (std::time::Duration::from_nanos(period), (slack > 0).then(|| std::time::Duration::from_nanos(slack))))
+}
+
+fn monotonic_micros() -> u64 {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime only writes the timespec it is given
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000 + now.tv_nsec as u64 / 1000
+}
 
 const GBM_FORMAT_XRGB8888: u32 = 0x3432_5258;
 
@@ -995,6 +1024,17 @@ struct Kms {
     shown: Option<(*mut c_void, u32)>,
     pending: Option<(*mut c_void, u32)>,
     set: bool,
+    /// how many pictures stayed up for 1, 2, 3 and 4 or more panel
+    /// refreshes, logged every few seconds: at an even frame rate they all
+    /// stay up as long.
+    held: [u32; 4],
+    held_since: std::time::Instant,
+    last_flip: u32,
+    /// when the flip still queued was asked for, in microseconds of the
+    /// monotonic clock, and the time from asking to flipping summed and
+    /// counted since the last log.
+    asked: u64,
+    slack: (u64, u32),
 }
 
 macro_rules! call {
@@ -1056,6 +1096,11 @@ impl Kms {
         }
         call!(drm, "drmModeFreeResources", fn(*mut DrmModeRes) -> (), resources);
         let (connector, mode, crtc) = found.ok_or("no connected display")?;
+        let refresh = mode.clock as f64 * 1000.0 / (mode.htotal as f64 * mode.vtotal as f64);
+        log::info!("panel {}x{} at {refresh:.3} Hz", mode.hdisplay, mode.vdisplay);
+        if (50.0..70.0).contains(&refresh) {
+            PANEL_PERIOD.store((1e9 / refresh) as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         let surface = call!(
             gbm,
             "gbm_surface_create",
@@ -1069,7 +1114,7 @@ impl Kms {
         if surface.is_null() {
             return Err("no GBM surface".into());
         }
-        Ok(Kms { drm, gbm, fd, device, surface, crtc, connector, mode, shown: None, pending: None, set: false })
+        Ok(Kms { drm, gbm, fd, device, surface, crtc, connector, mode, shown: None, pending: None, set: false, held: [0; 4], held_since: std::time::Instant::now(), last_flip: 0, asked: 0, slack: (0, 0) })
     }
 
     fn size(&self) -> (i32, i32) {
@@ -1086,6 +1131,23 @@ impl Kms {
             let mut poll = libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 };
             if libc::poll(&mut poll, 1, 100) > 0 {
                 call!(self.drm, "drmHandleEvent", fn(i32, *mut DrmEventContext) -> i32, self.fd, &mut context);
+                let at = FLIPPED_AT.load(std::sync::atomic::Ordering::Relaxed);
+                let slack = FLIPPED_TIME.load(std::sync::atomic::Ordering::Relaxed).wrapping_sub(self.asked);
+                if slack < 100_000 {
+                    PANEL_SLACK.store(slack * 1000, std::sync::atomic::Ordering::Relaxed);
+                    self.slack = (self.slack.0 + slack, self.slack.1 + 1);
+                }
+                let refreshes = at.wrapping_sub(self.last_flip) as usize;
+                if self.last_flip != 0 && refreshes > 0 {
+                    self.held[refreshes.min(4) - 1] += 1;
+                }
+                self.last_flip = at;
+                if self.held_since.elapsed() >= std::time::Duration::from_secs(5) {
+                    let [one, two, three, more] = std::mem::take(&mut self.held);
+                    let (sum, count) = std::mem::take(&mut self.slack);
+                    log::info!("pictures up for 1/2/3/4+ panel refreshes: {one}/{two}/{three}/{more}, handed over {:.1} ms before the refresh", sum as f64 / count.max(1) as f64 / 1000.0);
+                    self.held_since = std::time::Instant::now();
+                }
             }
             if let Some((bo, fb)) = self.shown.replace(pending) {
                 call!(self.drm, "drmModeRmFB", fn(i32, u32) -> i32, self.fd, fb);
@@ -1148,6 +1210,7 @@ impl Kms {
                 self.set = true;
                 self.shown = Some((bo, fb));
             } else if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, self.crtc, fb, 1, std::ptr::null_mut()) == 0 {
+                self.asked = monotonic_micros();
                 self.pending = Some((bo, fb));
             } else {
                 call!(self.drm, "drmModeRmFB", fn(i32, u32) -> i32, self.fd, fb);
