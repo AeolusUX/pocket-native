@@ -3842,6 +3842,13 @@ impl Gles {
         surface.dirty = Some((0, surface.height));
         surface.checked = false;
         surface.picture = None;
+        // what the surfaces inside the fill drew before it is gone
+        let end = addr as u64 + len as u64;
+        for (other, s) in self.surfaces.iter_mut().enumerate() {
+            if other != index && s.dirty.is_some() && s.addr >= addr && s.addr as u64 + s.size() as u64 <= end {
+                (s.dirty, s.picture) = (None, None);
+            }
+        }
         Ok(true)
     }
 
@@ -3854,12 +3861,21 @@ impl Gles {
 
     pub(crate) fn before_fill<M: GpuMemory>(&mut self, memory: &mut M, addr: u32, len: u32, _width: u32) -> Result<(), String> {
         let end = addr as u64 + len as u64;
-        let partial: Vec<usize> = (0..self.surfaces.len())
+        let (dropped, partial): (Vec<usize>, Vec<usize>) = (0..self.surfaces.len())
             .filter(|&i| {
                 let s = &self.surfaces[i];
                 s.dirty_overlaps(addr, len) && (s.addr < addr || s.addr as u64 + s.size() as u64 > end)
             })
-            .collect();
+            .partition(|&i| matches!(self.surfaces[i].kind, Kind::Depth(_)) && crate::fast_with(crate::speedup::CLEARS));
+        // a depth buffer a fill runs over in part is another buffer's memory
+        // by now, its depth past the fill went with the frame that drew it:
+        // Smash clears its bottom screen over the top screen's depth
+        for index in dropped {
+            let s = &mut self.surfaces[index];
+            s.shadow.resize(s.size() as usize, 0);
+            memory.read(s.addr, &mut s.shadow);
+            (s.dirty, s.checked, s.picture) = (None, false, None);
+        }
         if !partial.is_empty() {
             self.write_back(memory, partial)?;
         }
