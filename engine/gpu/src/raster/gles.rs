@@ -171,7 +171,7 @@ uniform bool opaque;
 uniform vec4 levels;
 layout(location = 0) out vec4 color;
 void main() {
-    vec4 texel = texelFetch(source, ivec2(int(gl_FragCoord.x), base - int(gl_FragCoord.y)), 0);
+    vec4 texel = texelFetch(source, ivec2(int(gl_FragCoord.x), max(base - int(gl_FragCoord.y), 0)), 0);
     texel = floor(round(texel * 255.0) * (levels + 1.0) / 256.0) / levels;
     color = opaque ? vec4(texel.rgb, 1.0) : texel;
 }
@@ -2859,12 +2859,21 @@ impl Gles {
         };
         let kinds = [Kind::Color(texture.format), depth];
         let tile_rows = 8 * texture.width * Kind::Color(texture.format).bytes();
+        let end = texture.addr as u64 + (texture.height / 8 * tile_rows) as u64;
         (0..self.surfaces.len())
             .filter(|&i| {
                 let s = &self.surfaces[i];
                 kinds.contains(&s.kind) && s.tiled && !s.stale && s.width == texture.width && {
                     let offset = texture.addr.checked_sub(s.addr).filter(|offset| offset % tile_rows == 0);
-                    offset.is_some_and(|offset| offset / tile_rows * 8 + texture.height <= s.height)
+                    offset.is_some_and(|offset| {
+                        let row = offset / tile_rows * 8;
+                        // a power-of-two texture over a smaller drawing, as a
+                        // 512 row texture over 400 drawn rows, repeats the
+                        // last row past it unless another drawing is there
+                        let below = s.addr as u64 + s.size() as u64;
+                        row + texture.height <= s.height
+                            || (matches!(s.kind, Kind::Color(_)) && row < s.height && !self.surfaces.iter().any(|o| o.dirty.is_some() && below < o.addr as u64 + o.size() as u64 && (o.addr as u64) < end))
+                    })
                 }
             })
             .max_by_key(|&i| (self.surfaces[i].dirty.is_some(), self.surfaces[i].height))
