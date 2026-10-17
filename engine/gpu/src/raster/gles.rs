@@ -1424,6 +1424,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                     let (width, height) = kms.size();
                     (width, height, None)
                 }
+                Output::Fbdev(window) => (window[0] as i32, window[1] as i32, None),
                 Output::Offscreen(framebuffer) => (640, 480, Some(*framebuffer)),
             };
             let fit = Fit::new(width, height);
@@ -1551,7 +1552,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
         }
         match &mut panel.output {
             Output::Kms(kms) => kms.flip(),
-            Output::Offscreen(_) => Ok(()),
+            Output::Fbdev(_) | Output::Offscreen(_) => Ok(()),
         }
     })
 }
@@ -1561,6 +1562,9 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
 /// saves each time, numbered in place of a % in the name.
 enum Output {
     Kms(Kms),
+    /// the framebuffer device's size, the window a Mali driver built for
+    /// it takes, kept where EGL was given it.
+    Fbdev(Box<[u16; 2]>),
     Offscreen(glow::Framebuffer),
 }
 
@@ -1775,29 +1779,92 @@ impl Egl {
                     visual as u32 == GBM_FORMAT_XRGB8888
                 })
                 .ok_or("no EGL config for the panel")?;
-            let context_attributes = [egl::CONTEXT_CLIENT_VERSION as i32, 3, egl::CONTEXT_MINOR_VERSION as i32, 1, egl::NONE as i32];
-            let context = loaded.CreateContext(display, config, egl::NO_CONTEXT, context_attributes.as_ptr());
-            if context.is_null() {
-                return Err(format!("could not create an OpenGL ES 3.1 context, 0x{:X}", loaded.GetError()));
-            }
-            let surface = loaded.CreateWindowSurface(display, config, kms.surface as glutin_egl_sys::EGLNativeWindowType, std::ptr::null());
-            if surface.is_null() {
-                return Err(format!("could not make a window surface, 0x{:X}", loaded.GetError()));
-            }
-            if loaded.MakeCurrent(display, surface, surface, context) == 0 {
-                return Err(format!("could not make the context current, 0x{:X}", loaded.GetError()));
-            }
-            loaded.SwapInterval(display, 0);
-            let gl = glow::Context::from_loader_function(|name| {
-                let direct = gles.as_ref().map_or(std::ptr::null(), |gles| symbol(gles, name));
-                if !direct.is_null() {
-                    return remember(name, direct);
-                }
-                let Ok(c_name) = CString::new(name) else { return std::ptr::null() };
-                remember(name, loaded.GetProcAddress(c_name.as_ptr()) as *const c_void)
-            });
-            Ok((Egl { libraries: (library, gles), egl: loaded, display, config, context, surface }, gl, kms))
+            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, kms.surface as glutin_egl_sys::EGLNativeWindowType, 0)?;
+            Ok((egl, gl, kms))
         }
+    }
+
+    /// screens through the framebuffer device, for a Mali driver built for
+    /// it rather than for GBM, as on Allwinner's H700 under Knulli.
+    fn new_fbdev() -> Result<(Egl, glow::Context, Box<[u16; 2]>), String> {
+        // SAFETY: FBIOGET_VSCREENINFO fills the 160 bytes of the screen's
+        // fb_var_screeninfo, its size first, and the EGL calls are as in new
+        unsafe {
+            let fd = libc::open(c"/dev/fb0".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC);
+            if fd < 0 {
+                return Err("could not open /dev/fb0".into());
+            }
+            let mut info = [0u32; 40];
+            let read = libc::ioctl(fd, 0x4600, info.as_mut_ptr());
+            libc::close(fd);
+            if read < 0 {
+                return Err("could not read the size of /dev/fb0".into());
+            }
+            let window = Box::new([info[0] as u16, info[1] as u16]);
+            let library = open(&["libEGL.so.1", "libEGL.so"]).map_err(|why| format!("could not load libEGL, {why}"))?;
+            let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]).ok();
+            let loaded = egl::Egl::load_with(|name| symbol(&library, name));
+            let display = loaded.GetDisplay(egl::DEFAULT_DISPLAY);
+            let (mut major, mut minor) = (0, 0);
+            if display.is_null() || loaded.Initialize(display, &mut major, &mut minor) == 0 {
+                return Err(format!("could not initialize EGL for /dev/fb0, 0x{:X}, {}", loaded.GetError(), drawing_libraries()));
+            }
+            loaded.BindAPI(egl::OPENGL_ES_API);
+            let attributes = [
+                egl::RENDERABLE_TYPE as i32,
+                egl::OPENGL_ES3_BIT as i32,
+                egl::SURFACE_TYPE as i32,
+                egl::WINDOW_BIT as i32,
+                egl::RED_SIZE as i32,
+                8,
+                egl::GREEN_SIZE as i32,
+                8,
+                egl::BLUE_SIZE as i32,
+                8,
+                egl::NONE as i32,
+            ];
+            let (mut config, mut count) = (std::ptr::null(), 0);
+            if loaded.ChooseConfig(display, attributes.as_ptr(), &mut config, 1, &mut count) == 0 || count == 0 {
+                return Err("no EGL config for /dev/fb0".into());
+            }
+            // the driver flips on the framebuffer, at the next refresh
+            let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, window.as_ptr() as glutin_egl_sys::EGLNativeWindowType, 1)?;
+            Ok((egl, gl, window))
+        }
+    }
+
+    /// an OpenGL ES 3.1 context drawing to a window, swapping its buffers
+    /// interval refreshes apart.
+    unsafe fn on_window(
+        (library, gles): (libloading::Library, Option<libloading::Library>),
+        loaded: egl::Egl,
+        display: egl::types::EGLDisplay,
+        config: egl::types::EGLConfig,
+        window: glutin_egl_sys::EGLNativeWindowType,
+        interval: i32,
+    ) -> Result<(Egl, glow::Context), String> {
+        let context_attributes = [egl::CONTEXT_CLIENT_VERSION as i32, 3, egl::CONTEXT_MINOR_VERSION as i32, 1, egl::NONE as i32];
+        let context = loaded.CreateContext(display, config, egl::NO_CONTEXT, context_attributes.as_ptr());
+        if context.is_null() {
+            return Err(format!("could not create an OpenGL ES 3.1 context, 0x{:X}", loaded.GetError()));
+        }
+        let surface = loaded.CreateWindowSurface(display, config, window, std::ptr::null());
+        if surface.is_null() {
+            return Err(format!("could not make a window surface, 0x{:X}", loaded.GetError()));
+        }
+        if loaded.MakeCurrent(display, surface, surface, context) == 0 {
+            return Err(format!("could not make the context current, 0x{:X}", loaded.GetError()));
+        }
+        loaded.SwapInterval(display, interval);
+        let gl = glow::Context::from_loader_function(|name| {
+            let direct = gles.as_ref().map_or(std::ptr::null(), |gles| symbol(gles, name));
+            if !direct.is_null() {
+                return remember(name, direct);
+            }
+            let Ok(c_name) = CString::new(name) else { return std::ptr::null() };
+            remember(name, loaded.GetProcAddress(c_name.as_ptr()) as *const c_void)
+        });
+        Ok((Egl { libraries: (library, gles), egl: loaded, display, config, context, surface }, gl))
     }
 
     /// a context sharing this one's objects, made current on the calling
@@ -1835,10 +1902,17 @@ impl Egl {
         }
     }
 
-    fn new_with_panel() -> Result<(Egl, glow::Context, Option<Kms>), String> {
+    fn new_with_panel() -> Result<(Egl, glow::Context, Option<Output>), String> {
         if std::env::var_os("ZAKURO_KMS").is_some() {
-            let (egl, gl, kms) = Egl::new_kms()?;
-            return Ok((egl, gl, Some(kms)));
+            return match Egl::new_kms() {
+                Ok((egl, gl, kms)) => Ok((egl, gl, Some(Output::Kms(kms)))),
+                Err(error) if std::path::Path::new("/dev/fb0").exists() => {
+                    let (egl, gl, window) = Egl::new_fbdev().map_err(|fbdev| format!("{error}, and {fbdev}"))?;
+                    log::info!("{error}, the screens go through /dev/fb0, {}x{}", window[0], window[1]);
+                    Ok((egl, gl, Some(Output::Fbdev(window))))
+                }
+                Err(error) => Err(error),
+            };
         }
         let (egl, gl) = Egl::new()?;
         Ok((egl, gl, None))
@@ -2661,10 +2735,10 @@ impl Worker {
         let handle = thread::Builder::new()
             .name("gles".into())
             .spawn(move || match Egl::new_with_panel() {
-                Ok((egl, gl, kms)) => {
+                Ok((egl, gl, output)) => {
                     let egl: &'static Egl = Box::leak(Box::new(egl));
-                    let output = match kms {
-                        Some(kms) => Some(Output::Kms(kms)),
+                    let output = match output {
+                        Some(output) => Some(output),
                         // SAFETY: on the GL thread, its context current
                         None if std::env::var_os("ZAKURO_PANEL_SHOT").is_some() => unsafe {
                             let image = gl.create_renderbuffer().expect("a renderbuffer for the panel");
