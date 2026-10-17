@@ -1,26 +1,29 @@
 #!/bin/bash
-# build.sh <rom> [--keys aes_keys.txt] [--out dir]
+# build.sh <rom>... [--keys aes_keys.txt] [--out dir]
 #
-# Builds Pocket Native and a game for the handheld from your own ROM, a
-# decrypted .3ds/.cci or a .cia with your console's aes_keys.txt, inside a
-# container (podman or docker). Leaves "Pocket Native" in the output
+# Builds Pocket Native and games for the handheld from your own ROMs,
+# decrypted .3ds/.cci files or .cia files with your console's aes_keys.txt,
+# inside a container (podman or docker). Leaves "Pocket Native" in the output
 # directory, build/ by default, to copy into roms/ports on the card.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-rom="" keys="" out="$repo/build"
+roms=() keys="" out="$repo/build"
 while [ $# -gt 0 ]; do
     case "$1" in
         --keys) keys="$(realpath "$2")"; shift 2 ;;
         --out) out="$(realpath -m "$2")"; shift 2 ;;
         -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
-        *) rom="$(realpath "$1")"; shift ;;
+        *) roms+=("$(realpath -m "$1")"); shift ;;
     esac
 done
-if [ ! -f "$rom" ]; then
-    echo "usage: scripts/build.sh <rom> [--keys aes_keys.txt] [--out dir]"
+if [ ${#roms[@]} -eq 0 ]; then
+    echo "usage: scripts/build.sh <rom>... [--keys aes_keys.txt] [--out dir]"
     exit 2
 fi
+for rom in "${roms[@]}"; do
+    [ -f "$rom" ] || { echo "no such file: $rom"; exit 2; }
+done
 engine=$(command -v podman || command -v docker) || { echo "the build needs podman or docker"; exit 1; }
 image=pocket-native-build:$(sha256sum "$repo/scripts/container/Containerfile" | cut -c1-12)
 if ! "$engine" image inspect "$image" >/dev/null 2>&1; then
@@ -31,11 +34,27 @@ fi
 mkdir -p "$out/.work"
 user=(--user "$(id -u):$(id -g)")
 [ "$(basename "$engine")" = podman ] && user=(--userns=keep-id)
-mounts=(-v "$repo:/src:ro" -v "$out/.work:/work" -v "$out:/out" -v "$(dirname "$rom"):/rom:ro")
-args=("/rom/$(basename "$rom")")
-if [ -n "$keys" ]; then
-    mounts+=(-v "$(dirname "$keys"):/keys:ro")
-    args+=("/keys/$(basename "$keys")")
+failed=()
+for rom in "${roms[@]}"; do
+    mounts=(-v "$repo:/src:ro" -v "$out/.work:/work" -v "$out:/out" -v "$(dirname "$rom"):/rom:ro")
+    args=("/rom/$(basename "$rom")")
+    # a .cia takes the keys given, else the aes_keys.txt beside it or in the kit
+    rom_keys="$keys"
+    if [ -z "$rom_keys" ] && [[ "${rom,,}" == *.cia ]]; then
+        for near in "$(dirname "$rom")/aes_keys.txt" "$repo/aes_keys.txt"; do
+            [ -f "$near" ] && { rom_keys="$near"; break; }
+        done
+    fi
+    if [ -n "$rom_keys" ]; then
+        mounts+=(-v "$(dirname "$rom_keys"):/keys:ro")
+        args+=("/keys/$(basename "$rom_keys")")
+    fi
+    "$engine" run --rm "${user[@]}" "${mounts[@]}" -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work \
+        "$image" bash /src/scripts/container/inside.sh "${args[@]}" || failed+=("$rom")
+done
+bash "$repo/scripts/update.sh" --check || true
+if [ ${#failed[@]} -gt 0 ]; then
+    printf '== these did not build:\n'
+    printf '   %s\n' "${failed[@]}"
+    exit 1
 fi
-"$engine" run --rm "${user[@]}" "${mounts[@]}" -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work \
-    "$image" bash /src/scripts/container/inside.sh "${args[@]}"

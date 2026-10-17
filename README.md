@@ -50,18 +50,23 @@ you dump from your own console.
 scripts/build.sh path/to/game.3ds
 ```
 
-With a `.cia`:
+With a `.cia`, if its `aes_keys.txt` is not next to it or in the kit's
+folder:
 
 ```bash
 scripts/build.sh path/to/game.cia --keys path/to/aes_keys.txt
 ```
 
-On Windows, from the repository's folder in PowerShell:
+On Windows, drag games onto `Build a game.bat`, or double-click it to pick
+them. It runs `scripts\build.ps1`, which takes the same arguments from
+PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.3ds
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.cia -Keys path\to\aes_keys.txt
 ```
+
+Several games can be given at once.
 
 Docker Desktop has to be running. The Windows build keeps its scratch space
 in a Docker volume, `pocket-native-work`; `docker volume rm
@@ -75,6 +80,14 @@ for a big game. Later builds reuse what they can.
 The result is a `Pocket Native` folder in `build/` (or wherever `--out` or
 `-Out` points), with the game in it. Building more games into the same folder adds
 them next to each other, one launcher each.
+
+## Updating
+
+A build ends by saying when a newer release is out. `scripts/update.sh`, or
+`Update Pocket Native.bat` on Windows, downloads it into the kit, moves the
+kit's old files to `.old`, and builds every game in `build/` again from the
+copies the last build left there. A git clone is updated with `git pull`
+instead. `--out`/`-Out` points it at another output folder.
 
 ## Installing
 

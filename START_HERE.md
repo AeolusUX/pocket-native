@@ -20,24 +20,25 @@ Other games may or may not boot.
 
 ## Building
 
-From the repository's folder:
+On Windows, drag your game onto `Build a game.bat` in the kit's folder,
+or double-click it and pick the game. Several games can go at once. A
+`.cia` needs your console's `aes_keys.txt`: put it next to the game or
+in the kit's folder and the build finds it, otherwise it asks for it.
+
+On Linux, from the kit's folder:
 
 ```bash
 scripts/build.sh path/to/game.3ds
 ```
 
-With a `.cia`:
+With a `.cia`, if its `aes_keys.txt` is not next to it or in the kit's
+folder:
 
 ```bash
 scripts/build.sh path/to/game.cia --keys path/to/aes_keys.txt
 ```
 
-On Windows, in PowerShell:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.3ds
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.cia -Keys path\to\aes_keys.txt
-```
+Several games can be given at once here too.
 
 The first build sets up the build container, which downloads a few
 hundred MB and takes a while. Each game's code is recompiled, which
@@ -87,6 +88,18 @@ and copy the whole folder again.
 A tap of FN opens the menu in game and pauses it, FN + Start quits.
 Saves and the game's log go in
 `Pocket Native/pocket-native/games/<title id>/data`.
+
+## Updating
+
+When a new version is out, the build says so when it finishes. Double-click
+`Update Pocket Native.bat` on Windows, or run `scripts/update.sh` on Linux.
+It downloads the new version into the kit, keeps the kit's old files in
+`.old`, and builds every game in `build/` again, so you don't need your
+game files for it. Then copy the `Pocket Native` folder onto the card
+again, over the old one. Your saves stay where they are.
+
+The menu shows which version a game was built with, next to "Pocket
+Native" at the top.
 
 ## If it goes wrong
 

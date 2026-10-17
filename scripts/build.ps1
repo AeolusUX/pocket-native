@@ -1,26 +1,58 @@
-# build.ps1 <rom> [-Keys aes_keys.txt] [-Out folder]
+# build.ps1 [rom...] [-Keys aes_keys.txt] [-Out folder]
 #
-# build.sh for Windows: builds Pocket Native and a game for the handheld from
-# your own ROM, a decrypted .3ds/.cci or a .cia with your console's
-# aes_keys.txt, inside a container (Docker Desktop or Podman). Leaves
-# "Pocket Native" in the output folder, build\ by default, to copy into
-# roms\ports on the card.
+# build.sh for Windows: builds Pocket Native and games for the handheld from
+# your own ROMs, decrypted .3ds/.cci files or .cia files with your console's
+# aes_keys.txt, inside a container (Docker Desktop or Podman). With no ROM
+# it asks for them. Leaves "Pocket Native" in the output folder, build\ by
+# default, to copy into roms\ports on the card.
 param(
-    [Parameter(Mandatory = $true, Position = 0)][string]$Rom,
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)][string[]]$Rom = @(),
     [string]$Keys = "",
     [string]$Out = ""
 )
 
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not (Test-Path -LiteralPath $Rom -PathType Leaf)) {
-    Write-Host "usage: scripts\build.ps1 <rom> [-Keys aes_keys.txt] [-Out folder]"
-    exit 2
+
+function Pick($title, $filter, $many) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog -Property @{ Title = $title; Filter = $filter; Multiselect = $many }
+    # an owner on top keeps the dialog from opening behind the console
+    $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }
+    if ("$($dialog.ShowDialog($owner))" -ne "OK") { return @() }
+    return $dialog.FileNames
 }
-$Rom = (Resolve-Path -LiteralPath $Rom).Path
+
+if ($Rom.Count -eq 0) {
+    $Rom = @(Pick "Pick the games to build" "3DS games (*.3ds;*.cci;*.cia)|*.3ds;*.cci;*.cia|All files|*.*" $true)
+    if ($Rom.Count -eq 0) {
+        Write-Host "no game picked"
+        exit 2
+    }
+}
+foreach ($file in $Rom) {
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        Write-Host "usage: scripts\build.ps1 [rom...] [-Keys aes_keys.txt] [-Out folder]"
+        Write-Host "no such file: $file"
+        exit 2
+    }
+}
+$Rom = @($Rom | ForEach-Object { (Resolve-Path -LiteralPath $_).Path })
 if ($Keys) { $Keys = (Resolve-Path -LiteralPath $Keys -ErrorAction Stop).Path }
 if (-not $Out) { $Out = Join-Path $repo "build" }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $Out = (Resolve-Path -LiteralPath $Out).Path
+
+# a .cia takes the keys given, else the aes_keys.txt beside it or in the kit,
+# else the one picked when asked
+function KeysFor($file) {
+    if ($script:Keys -or [IO.Path]::GetExtension($file) -ne ".cia") { return $script:Keys }
+    foreach ($near in @((Join-Path (Split-Path -Parent $file) "aes_keys.txt"), (Join-Path $repo "aes_keys.txt"))) {
+        if (Test-Path -LiteralPath $near -PathType Leaf) { return $near }
+    }
+    $picked = @(Pick "A .cia needs your console's aes_keys.txt, pick it" "aes_keys.txt|aes_keys.txt|Text files (*.txt)|*.txt" $false)
+    if ($picked.Count -gt 0) { $script:Keys = $picked[0] }
+    return $script:Keys
+}
 
 $engine = @("docker", "podman") | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
 if (-not $engine) {
@@ -46,14 +78,25 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-# the scratch space stays in a volume on the container's own disk, compiling
-# into a Windows folder is many times slower
-$mounts = @("-v", "${repo}:/src:ro", "-v", "pocket-native-work:/work", "-v", "${Out}:/out", "-v", "$(Split-Path -Parent $Rom):/rom:ro")
-$arguments = @("/rom/$(Split-Path -Leaf $Rom)")
-if ($Keys) {
-    $mounts += @("-v", "$(Split-Path -Parent $Keys):/keys:ro")
-    $arguments += "/keys/$(Split-Path -Leaf $Keys)"
+$failed = @()
+foreach ($file in $Rom) {
+    # the scratch space stays in a volume on the container's own disk,
+    # compiling into a Windows folder is many times slower
+    $mounts = @("-v", "${repo}:/src:ro", "-v", "pocket-native-work:/work", "-v", "${Out}:/out", "-v", "$(Split-Path -Parent $file):/rom:ro")
+    $arguments = @("/rom/$(Split-Path -Leaf $file)")
+    $gameKeys = KeysFor $file
+    if ($gameKeys) {
+        $mounts += @("-v", "$(Split-Path -Parent $gameKeys):/keys:ro")
+        $arguments += "/keys/$(Split-Path -Leaf $gameKeys)"
+    }
+    & $engine run --rm @mounts -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work `
+        $image bash /src/scripts/container/inside.sh @arguments
+    if ($LASTEXITCODE -ne 0) { $failed += $file }
 }
-& $engine run --rm @mounts -e CARGO_HOME=/work/cargo -e CARGO_TARGET_DIR=/work/target -e HOME=/work `
-    $image bash /src/scripts/container/inside.sh @arguments
-exit $LASTEXITCODE
+& (Join-Path $PSScriptRoot "update.ps1") -Check
+if ($failed.Count -gt 0) {
+    Write-Host "== these did not build:"
+    $failed | ForEach-Object { Write-Host "   $_" }
+    exit 1
+}
+exit 0

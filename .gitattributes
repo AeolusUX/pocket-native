@@ -1,4 +1,6 @@
 # Unix line endings everywhere, even in a Windows checkout: the build runs
 # its scripts in a Linux container and the handheld runs the launchers
 * text=auto eol=lf
+# but cmd reads batch files, the Windows launchers, best with Windows ones
+*.bat text eol=crlf
 *.font binary
