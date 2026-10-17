@@ -7,7 +7,8 @@ into a folder for the SD card, and that is the part most people miss.
 The whole thing in one line: download the kit, drop your game on
 `Build a game`, and copy the folder it makes to the card.
 
-Only Pokémon Omega Ruby and Alpha Sapphire have been tested and tuned.
+Tested and tuned: Pokémon Omega Ruby and Alpha Sapphire, Animal
+Crossing: New Leaf and Mario Kart 7 (the US versions of those two).
 Other games may or may not boot.
 
 ## What you need
@@ -152,8 +153,8 @@ far too slowly to show anything. No setting fixes that. Builds before
 current version. If it still happens, the game's `log.txt` has a line
 with `could not initialize EGL`, please post it in an issue.
 
-**A game other than Omega Ruby or Alpha Sapphire does not start, or
-runs badly.** That is expected for now. Its `log.txt`, in the game's
+**A game that is not one of the tested ones does not start, or runs
+badly.** That is expected for now. Its `log.txt`, in the game's
 `data` folder above, says what the emulator ran into. Most games have
 something worth trying first: open the menu, go to **Advanced
 settings**, pick **Most compatible**, then **Restart game**.

@@ -1,0 +1,5 @@
+name = "Mario Kart 7"
+
+# the frames a 30 fps cap never shows left undrawn
+[advanced]
+shown_only = true

@@ -30,7 +30,12 @@ this fork.
 
 ## Games
 
-Only Pokémon Omega Ruby and Alpha Sapphire have been tested and tuned.
+Tested and tuned on the R36S:
+
+- Pokémon Omega Ruby and Alpha Sapphire
+- Animal Crossing: New Leaf (US version)
+- Mario Kart 7 (US version)
+
 Other games may or may not boot. See [docs/games.md](docs/games.md) for
 trying a game and adding a profile for it.
 

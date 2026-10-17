@@ -1,0 +1,4 @@
+name = "Animal Crossing: New Leaf"
+
+[advanced]
+cull = false
