@@ -1162,6 +1162,9 @@ impl Gpu {
                 if self.right_eye_candidate {
                     self.right_eye_off("a picture taken for the right eye's drew the bottom screen too");
                 }
+                if !self.both_screens {
+                    log::info!("switch: bottom screen skipping off, the title drew both screens between two transfers");
+                }
                 self.both_screens = true;
                 self.skipped_bottom = false;
                 if self.skipping && !self.skipping_frame {
