@@ -1051,8 +1051,8 @@ impl Kms {
     /// SAFETY: plain libdrm and GBM calls on the descriptor and device this
     /// opens, with the structs they return read before they are freed
     unsafe fn open() -> Result<Kms, String> {
-        let drm = open(&["libdrm.so.2", "libdrm.so"]).ok_or("could not load libdrm")?;
-        let gbm = open(&["libgbm.so.1", "libgbm.so"]).ok_or("could not load libgbm")?;
+        let drm = open(&["libdrm.so.2", "libdrm.so"]).map_err(|why| format!("could not load libdrm, {why}"))?;
+        let gbm = open(&["libgbm.so.1", "libgbm.so"]).map_err(|why| format!("could not load libgbm, {why}"))?;
         let path = CString::new("/dev/dri/card0").map_err(|error| error.to_string())?;
         let fd = libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC);
         if fd < 0 {
@@ -1613,10 +1613,18 @@ fn symbol(library: &libloading::Library, name: &str) -> *const c_void {
     unsafe { library.get::<*const c_void>(name.as_bytes_with_nul()).map_or(std::ptr::null(), |symbol| *symbol) }
 }
 
-fn open(names: &[&str]) -> Option<libloading::Library> {
-    // SAFETY: loading the system's EGL and GLES libraries runs their
-    // initializers, which is what using them takes
-    names.iter().find_map(|name| unsafe { libloading::Library::new(name) }.ok())
+/// the first of the names that loads, else why the first did not.
+fn open(names: &[&str]) -> Result<libloading::Library, String> {
+    let mut first = None;
+    for name in names {
+        // SAFETY: loading the system's EGL and GLES libraries runs their
+        // initializers, which is what using them takes
+        match unsafe { libloading::Library::new(name) } {
+            Ok(library) => return Ok(library),
+            Err(why) => _ = first.get_or_insert(why.to_string()),
+        }
+    }
+    Err(first.unwrap_or_default())
 }
 
 /// the EGL, GBM and Mali libraries this process loaded, and whether it can
@@ -1639,7 +1647,7 @@ fn drawing_libraries() -> String {
 }
 
 fn gbm_display(loaded: &egl::Egl) -> Option<egl::types::EGLDisplay> {
-    let library = open(&["libgbm.so.1", "libgbm.so"])?;
+    let library = open(&["libgbm.so.1", "libgbm.so"]).ok()?;
     let create = symbol(&library, "gbm_create_device");
     if create.is_null() {
         return None;
@@ -1671,8 +1679,8 @@ fn gbm_display(loaded: &egl::Egl) -> Option<egl::types::EGLDisplay> {
 
 impl Egl {
     fn new() -> Result<(Egl, glow::Context), String> {
-        let library = open(&["libEGL.so.1", "libEGL.so"]).ok_or("could not load libEGL")?;
-        let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]);
+        let library = open(&["libEGL.so.1", "libEGL.so"]).map_err(|why| format!("could not load libEGL, {why}"))?;
+        let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]).ok();
         let loaded = egl::Egl::load_with(|name| symbol(&library, name));
         // SAFETY: plain EGL calls with attribute lists that end in NONE and
         // live as long as each call
@@ -1745,8 +1753,8 @@ impl Egl {
                 true => (&["libgbm.so.1", "libgbm.so"], &["libgbm.so.1", "libgbm.so"]),
                 false => (&["libEGL.so.1", "libEGL.so"], &["libGLESv2.so.2", "libGLESv2.so"]),
             };
-            let library = open(egl_names).ok_or("could not load libEGL")?;
-            let gles = open(gles_names);
+            let library = open(egl_names).map_err(|why| format!("could not load libEGL, {why}"))?;
+            let gles = open(gles_names).ok();
             let loaded = egl::Egl::load_with(|name| symbol(&library, name));
             let display = loaded.GetDisplay(kms.device as glutin_egl_sys::EGLNativeDisplayType);
             let (mut major, mut minor) = (0, 0);
