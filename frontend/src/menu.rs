@@ -34,6 +34,8 @@ enum Field {
     TouchSpeed,
     Buttons,
     LeftStick,
+    ReverseTiltX,
+    ReverseTiltY,
     Resume,
     Advanced,
     Reset,
@@ -138,7 +140,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Display", vec![Field::Layout, Field::Smooth, Field::Interpolate, Field::ShowFps, Field::ShowClock]),
             ("Performance", vec![Field::FrameCap, Field::Power]),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
-            ("Controls", vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick]),
+            ("Controls", vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::ReverseTiltX, Field::ReverseTiltY]),
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
         ],
         Page::Advanced => vec![
@@ -181,6 +183,8 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
         Field::TouchSpeed => ("Touch cursor speed", format!("{:?}", settings.touch_speed)),
         Field::Buttons => ("A/B layout", format!("{:?}", settings.buttons)),
         Field::LeftStick => ("Left stick", if settings.left_stick == Stick::CirclePad { "Circle pad" } else { "D-pad" }.into()),
+        Field::ReverseTiltX => ("Reverse tilt X", if settings.reverse_tilt_x { "On" } else { "Off" }.into()),
+        Field::ReverseTiltY => ("Reverse tilt Y", if settings.reverse_tilt_y { "On" } else { "Off" }.into()),
         Field::Resume => ("Resume", String::new()),
         Field::Advanced => ("Advanced settings", "→".into()),
         Field::Reset => ("Reset", String::new()),
@@ -224,6 +228,8 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::TouchSpeed => settings.touch_speed = step(&[Speed::Slow, Speed::Normal, Speed::Fast], settings.touch_speed, by),
         Field::Buttons => settings.buttons = step(&[Buttons::Nintendo, Buttons::Xbox], settings.buttons, by),
         Field::LeftStick => settings.left_stick = step(&[Stick::CirclePad, Stick::Dpad], settings.left_stick, by),
+        Field::ReverseTiltX => settings.reverse_tilt_x = !settings.reverse_tilt_x,
+        Field::ReverseTiltY => settings.reverse_tilt_y = !settings.reverse_tilt_y,
         Field::Toggle(index) => {
             let mut advanced = Advanced::of(game, profile);
             let setting = (TOGGLES[index].1)(&mut advanced);
@@ -255,6 +261,8 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::TouchSpeed => "How fast the right stick moves the touch cursor. R2 or R3 touches.",
         Field::Buttons => "Which face buttons are A and B: where Nintendo puts them, or where Xbox does.",
         Field::LeftStick => "The left stick as the circle pad, or as the d-pad.",
+        Field::ReverseTiltX => "Holding L2, the right stick tilts the console. On tilts it the other way left and right.",
+        Field::ReverseTiltY => "Holding L2, the right stick tilts the console. On tilts it the other way up and down.",
         Field::Resume => "Back to the game. B or FN does the same.",
         Field::Advanced => "This game's switches for speed and for games that do not run right, each with a hint.",
         Field::Reset => "Starts the game again from the beginning.",

@@ -274,7 +274,12 @@ fn main() {
         if l2 {
             tilt_from = (Instant::now(), false);
         }
-        let tilt = if keys.contains(&L2) { (input::stick(axes[3]), input::stick(axes[4])) } else { (0.0, 0.0) };
+        let reversed = |reverse: bool| if reverse { -1.0 } else { 1.0 };
+        let tilt = if keys.contains(&L2) {
+            (input::stick(axes[3]) * reversed(settings.reverse_tilt_x), input::stick(axes[4]) * reversed(settings.reverse_tilt_y))
+        } else {
+            (0.0, 0.0)
+        };
         tilt_from.1 |= tilt != (0.0, 0.0);
         // L2 let go soon and without tilting swaps the screens
         let l2_tapped = held.contains(&L2) && !keys.contains(&L2) && !tilt_from.1 && tilt_from.0.elapsed() < Duration::from_millis(300);

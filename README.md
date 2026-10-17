@@ -145,7 +145,7 @@ Saves, the game's own settings and its log go in
   performance)
 - **This game:** options from the game's profile
 - **Controls:** touch cursor speed, Nintendo or Xbox button layout, left
-  stick as circle pad or D-pad
+  stick as circle pad or D-pad, tilt reversed left and right or up and down
 - **Game:** resume, advanced settings, reset, quit
 
 The selected setting's help shows at the bottom of the menu.

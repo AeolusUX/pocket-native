@@ -59,6 +59,10 @@ pub struct Settings {
     pub touch_speed: Speed,
     pub buttons: Buttons,
     pub left_stick: Stick,
+    /// tilting with L2 and the right stick the other way, left and right
+    /// or up and down.
+    pub reverse_tilt_x: bool,
+    pub reverse_tilt_y: bool,
 }
 
 impl Default for Settings {
@@ -75,6 +79,8 @@ impl Default for Settings {
             touch_speed: Speed::Normal,
             buttons: Buttons::Nintendo,
             left_stick: Stick::CirclePad,
+            reverse_tilt_x: false,
+            reverse_tilt_y: false,
         }
     }
 }
