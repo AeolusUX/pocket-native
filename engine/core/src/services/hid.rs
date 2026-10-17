@@ -20,7 +20,11 @@ const MOTION_ENTRIES: u32 = 0x20;
 const ACCELEROMETER_SAMPLES: u32 = 8;
 const GYROSCOPE_SAMPLES: u32 = 32;
 /// what the accelerometer reads for one g.
-const ONE_G: i16 = 512;
+const ONE_G: f32 = 512.0;
+/// what the gyroscope reads for one degree a second.
+const ONE_DPS: f32 = 14.375;
+/// how far a full tilt turns the console, in radians.
+const MOST_TILT: f32 = std::f32::consts::FRAC_PI_3;
 
 bitflags::bitflags! {
     /// button bits exactly as the hardware reports them.
@@ -56,6 +60,9 @@ pub struct InputState {
     pub circle_y: f32,
     /// touch position in screen pixels, when touched.
     pub touch: Option<(u16, u16)>,
+    /// how far the console is tilted, for the motion sensors, -1.0 to 1.0
+    /// on each axis, x to the right and y down as on the screen.
+    pub tilt: (f32, f32),
 }
 
 #[derive(Default)]
@@ -78,6 +85,8 @@ pub struct HidState {
     /// the tick each section's ring last started over at, and the one
     /// before, for the pad, touch, accelerometer and gyroscope.
     pub reset_ticks: [(u64, u64); 4],
+    /// the console's turn at the last sample, as an axis times its angle.
+    pub turn: [f32; 3],
     /// the input the frontend gave last.
     pub input: InputState,
 }
@@ -114,12 +123,14 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         }
         // GetGyroscopeLowRawToDpsCoefficient
         0x0015 => {
-            buffer.reply(&mut system.memory, 0x0015, &[(14.375f32).to_bits()]);
+            buffer.reply(&mut system.memory, 0x0015, &[ONE_DPS.to_bits()]);
             true
         }
-        // GetGyroscopeLowCalibrateParam
+        // GetGyroscopeLowCalibrateParam, each axis's zero then its reading
+        // at a full turn either way, as Citra measured them
         0x0016 => {
-            buffer.reply(&mut system.memory, 0x0016, &[0, 0, 0, 0, 0]);
+            let [zero, full, back] = [0u32, 6700, (-6700i16) as u16 as u32];
+            buffer.reply(&mut system.memory, 0x0016, &[zero | full << 16, back | zero << 16, full | back << 16, zero | full << 16, back]);
             true
         }
         // GetSoundVolume
@@ -272,13 +283,24 @@ pub fn update(system: &mut System, input: InputState) {
         system.kernel.signal_event(*object);
     }
 
-    // the sensors report the console held still and upright, titles that
-    // turn one on wait for its event
+    // the sensors report the console upright and turned by the tilt, the
+    // way Citra's mouse tilting turns it, and titles that turn one on wait
+    // for its event
+    let (x, y) = input.tilt;
+    let length = x.hypot(y).max(1.0);
+    let turn = [-y / length * MOST_TILT, 0.0, x / length * MOST_TILT];
+    let before = std::mem::replace(&mut system.services.hid.turn, turn);
+    let back = turn.map(|c| -c);
+    let gravity = turned([0.0, -ONE_G, 0.0], back).map(|c| c as i16);
+    let rate = turned(std::array::from_fn(|i| (turn[i] - before[i]).to_degrees() * 60.0 * ONE_DPS), back).map(|c| c as i16);
     let hid = &system.services.hid;
     if hid.accelerometer_users > 0 {
         let index = (hid.accelerometer_index + 1) % ACCELEROMETER_SAMPLES;
         system.services.hid.accelerometer_index = index;
-        motion_sample(system, base + ACCELEROMETER_BASE, ACCELEROMETER, index, tick, [0, -ONE_G, 0]);
+        // Citra's raw sample, found close to twice the calibrated one on hardware
+        let [x, y, z] = gravity;
+        let raw = [-2 * x, -2 * z, 2 * y];
+        motion_sample(system, base + ACCELEROMETER_BASE, ACCELEROMETER, index, tick, raw, gravity);
         if let Some(&event) = objects.get(2) {
             system.kernel.signal_event(event);
         }
@@ -287,21 +309,34 @@ pub fn update(system: &mut System, input: InputState) {
     if hid.gyroscope_users > 0 {
         let index = (hid.gyroscope_index + 1) % GYROSCOPE_SAMPLES;
         system.services.hid.gyroscope_index = index;
-        motion_sample(system, base + GYROSCOPE_BASE, GYROSCOPE, index, tick, [0, 0, 0]);
+        motion_sample(system, base + GYROSCOPE_BASE, GYROSCOPE, index, tick, rate, rate);
         if let Some(&event) = objects.get(3) {
             system.kernel.signal_event(event);
         }
     }
 }
 
-/// writes a motion sensor's sample as both its raw one and entry index.
-fn motion_sample(system: &mut System, section: u32, which: usize, index: u32, tick: u64, sample: [i16; 3]) {
+/// writes a motion sensor's raw sample, and its sample as entry index.
+fn motion_sample(system: &mut System, section: u32, which: usize, index: u32, tick: u64, raw: [i16; 3], sample: [i16; 3]) {
     write_section_header(system, section, which, index, tick);
-    for at in [section + 0x18, section + MOTION_ENTRIES + index * 6] {
+    for (at, sample) in [(section + 0x18, raw), (section + MOTION_ENTRIES + index * 6, sample)] {
         for (i, value) in sample.iter().enumerate() {
             put16(system, at + i as u32 * 2, *value as u16);
         }
     }
+}
+
+/// a vector turned about an axis by the axis's length, in radians.
+fn turned(v: [f32; 3], by: [f32; 3]) -> [f32; 3] {
+    let angle = by.iter().map(|c| c * c).sum::<f32>().sqrt();
+    if angle == 0.0 {
+        return v;
+    }
+    let k = by.map(|c| c / angle);
+    let (sin, cos) = angle.sin_cos();
+    let along = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+    let cross = [k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]];
+    std::array::from_fn(|i| v[i] * cos + cross[i] * sin + k[i] * along * (1.0 - cos))
 }
 
 /// parses frame:BUTTON[+BUTTON...] entries separated by commas, where @XxY
@@ -359,5 +394,6 @@ pub fn scripted_input(script: &[(u64, PadState, Option<(u16, u16)>)], frame: u64
         touch,
         circle_x: axis(PadState::CIRCLE_RIGHT, PadState::CIRCLE_LEFT),
         circle_y: axis(PadState::CIRCLE_UP, PadState::CIRCLE_DOWN),
+        ..Default::default()
     }
 }

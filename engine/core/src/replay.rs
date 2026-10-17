@@ -65,6 +65,7 @@ impl Replay {
                         circle_x: x.parse().ok()?,
                         circle_y: y.parse().ok()?,
                         touch: (tx >= 0).then_some((tx as u16, ty as u16)),
+                        ..Default::default()
                     },
                 ))
             };
@@ -99,7 +100,7 @@ mod tests {
     #[test]
     fn a_recording_plays_back() {
         let path = std::env::temp_dir().join(format!("zakuro-replay-{}.txt", std::process::id()));
-        let pressed = InputState { buttons: PadState::A, circle_x: 0.5, circle_y: -1.0, touch: Some((10, 20)) };
+        let pressed = InputState { buttons: PadState::A, circle_x: 0.5, circle_y: -1.0, touch: Some((10, 20)), ..Default::default() };
         let mut recorder = Recorder::create(&path, 1234).unwrap();
         for frame in 0..10 {
             recorder.record(if (3..6).contains(&frame) { pressed } else { InputState::default() });

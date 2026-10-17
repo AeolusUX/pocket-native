@@ -244,7 +244,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
 /// what the help under the list says about a field.
 fn help(field: Field, profile: &Profile) -> &str {
     match field {
-        Field::Layout => "Where the screens go. L2 swaps them, FN and R1 switch to one big screen.",
+        Field::Layout => "Where the screens go. A tap of L2 swaps them, FN and R1 switch to one big screen.",
         Field::Smooth => "Smooths the picture as it is scaled up. Off is sharper, with uneven pixels.",
         Field::Interpolate => "Fills in pictures halfway between a game's, up to 30 or 60 a second. 30 costs half as much GPU time.",
         Field::ShowFps => "Pictures a second and the temperature, in the bottom right corner.",

@@ -126,13 +126,14 @@ Saves, the game's own settings and its log go in
 | Left stick | Circle pad (or the D-pad, in the menu) |
 | Right stick | Moves the touch cursor |
 | R2 or R3 | Touches the screen under the cursor |
+| L2 held + right stick | Tilts the console, for games that use motion |
 | Start / Select | Start / Select |
 
 | Hotkey | Does |
 |---|---|
 | Tap FN | Opens the menu and pauses the game |
 | FN + Start | Quits |
-| L2, or FN + L1 | Swaps the screens |
+| Tap L2, or FN + L1 | Swaps the screens |
 | FN + R1 | Switches between both screens and one big screen |
 
 ## The menu

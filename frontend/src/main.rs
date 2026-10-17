@@ -4,9 +4,9 @@
 //!
 //! ZAKURO_KMS=1 ZAKURO_RECOMPILED=title.so ZAKURO_DATA=dir pocket-native <rom>
 //!
-//! A tap of FN opens the menu, FN+Start quits, L2 or FN+L1 swaps the screens,
-//! FN+R1 shows both or one big, the right stick moves the touch cursor and
-//! R2 touches. Reset in the menu exits with 3, for the launcher to start the
+//! A tap of FN opens the menu, FN+Start quits, a tap of L2 or FN+L1 swaps
+//! the screens, FN+R1 shows both or one big, the right stick moves the touch
+//! cursor and R2 touches, or tilts the console with L2 held. Reset in the menu exits with 3, for the launcher to start the
 //! game again.
 //!
 //! pocket-native --probe <rom> [frames] tries a game as fast as it runs and
@@ -160,6 +160,8 @@ fn main() {
     let mut presented = 0u64;
     let mut cursor = (160.0f32, 120.0f32);
     let mut held = HashSet::new();
+    // when L2 went down, and whether the stick tilted the console since
+    let mut tilt_from = (Instant::now(), false);
     let fixed_skip: Option<u32> = std::env::var("ZAKURO_FRAMESKIP").ok().and_then(|value| value.parse().ok());
     let mut most_skipped = fixed_skip.unwrap_or(advanced.frame_skip);
     let mut shown_only = advanced.shown_only;
@@ -269,7 +271,14 @@ fn main() {
         if hotkey && start {
             break;
         }
-        if hotkey && l1 || l2 {
+        if l2 {
+            tilt_from = (Instant::now(), false);
+        }
+        let tilt = if keys.contains(&L2) { (input::stick(axes[3]), input::stick(axes[4])) } else { (0.0, 0.0) };
+        tilt_from.1 |= tilt != (0.0, 0.0);
+        // L2 let go soon and without tilting swaps the screens
+        let l2_tapped = held.contains(&L2) && !keys.contains(&L2) && !tilt_from.1 && tilt_from.0.elapsed() < Duration::from_millis(300);
+        if hotkey && l1 || l2_tapped {
             settings.swapped = !settings.swapped;
         }
         if hotkey && r1 {
@@ -294,13 +303,15 @@ fn main() {
         system.skip_frames(skip, unshown);
         let (buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings) };
         let step = input::cursor_step(settings.touch_speed);
-        cursor.0 = (cursor.0 + input::stick(axes[3]) * step).clamp(0.0, 319.0);
-        cursor.1 = (cursor.1 + input::stick(axes[4]) * step).clamp(0.0, 239.0);
+        if !keys.contains(&L2) {
+            cursor.0 = (cursor.0 + input::stick(axes[3]) * step).clamp(0.0, 319.0);
+            cursor.1 = (cursor.1 + input::stick(axes[4]) * step).clamp(0.0, 239.0);
+        }
         let touching = keys.contains(&R2) || keys.contains(&R3);
         if probe.is_some() && script.is_empty() {
             system.set_input(InputState { buttons: probe::Probe::buttons(frame_number), ..Default::default() });
         } else if script.is_empty() {
-            system.set_input(InputState { buttons, circle_x, circle_y, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)) });
+            system.set_input(InputState { buttons, circle_x, circle_y, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)), tilt });
         } else {
             system.set_input(scripted_input(&script, frame_number));
         }
