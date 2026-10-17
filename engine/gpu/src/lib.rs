@@ -312,7 +312,8 @@ pub struct Gpu {
     right_eye_candidate: bool,
     right_eye_seen: u8,
     right_eye_short: u8,
-    /// the color buffer the draws since the last transfer went to, and
+    /// the color buffer the draws since the last transfer went to, the
+    /// first top screen sized one's after passes of other sizes, and
     /// whether they were skipped as the bottom screen's, which a transfer
     /// to the top screen shows was wrong, turning that skipping off for the
     /// title.
@@ -1164,6 +1165,9 @@ impl Gpu {
             self.skipping = skip_draws || right_eye || self.skipped_bottom;
             self.skipped_targets.clear();
         } else if self.screens_drawn | screen != self.screens_drawn {
+            if self.screens_drawn == 0 && screen == 2 {
+                self.period_target = self.internal[REG_COLOR_BUFFER_ADDRESS] << 3;
+            }
             self.screens_drawn |= screen;
             if self.screens_drawn == 3 {
                 if self.right_eye_candidate {
