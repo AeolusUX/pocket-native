@@ -57,9 +57,10 @@ folder:
 scripts/build.sh path/to/game.cia --keys path/to/aes_keys.txt
 ```
 
-On Windows, drag games onto `Build a game.bat`, or double-click it to pick
-them. It runs `scripts\build.ps1`, which takes the same arguments from
-PowerShell:
+Games can also be dropped on `Build a game` in the kit's folder, or picked
+when it is opened: `Build a game.desktop` on Linux, `Build a game.bat` on
+Windows. The Windows one runs `scripts\build.ps1`, which takes the same
+arguments from PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1 path\to\game.3ds
@@ -84,7 +85,7 @@ them next to each other, one launcher each.
 ## Updating
 
 A build ends by saying when a newer release is out. `scripts/update.sh`, or
-`Update Pocket Native.bat` on Windows, downloads it into the kit, moves the
+`Update Pocket Native` in the kit's folder, downloads it into the kit, moves the
 kit's old files to `.old`, and builds every game in `build/` again from the
 copies the last build left there. A git clone is updated with `git pull`
 instead. `--out`/`-Out` points it at another output folder.

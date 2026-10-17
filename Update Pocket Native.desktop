@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Update Pocket Native
+Comment=Brings this kit up to the latest release and builds your games again
+Icon=system-software-update
+Terminal=true
+Exec=sh -c "d=\\${0#file://}; exec \\"\\${d%%/*}/scripts/update.sh\\" --wait" %k

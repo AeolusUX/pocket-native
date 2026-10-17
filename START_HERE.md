@@ -25,7 +25,10 @@ or double-click it and pick the game. Several games can go at once. A
 `.cia` needs your console's `aes_keys.txt`: put it next to the game or
 in the kit's folder and the build finds it, otherwise it asks for it.
 
-On Linux, from the kit's folder:
+On Linux, it's the same with `Build a game` in the kit's folder: drop
+your games on it, or open it and pick them. The first time, the file
+manager may ask whether to trust or run it. From a terminal, in the kit's
+folder:
 
 ```bash
 scripts/build.sh path/to/game.3ds
@@ -91,8 +94,9 @@ Saves and the game's log go in
 
 ## Updating
 
-When a new version is out, the build says so when it finishes. Double-click
-`Update Pocket Native.bat` on Windows, or run `scripts/update.sh` on Linux.
+When a new version is out, the build says so when it finishes. Open
+`Update Pocket Native` in the kit's folder (`Update Pocket Native.bat` on
+Windows), or run `scripts/update.sh`.
 It downloads the new version into the kit, keeps the kit's old files in
 `.old`, and builds every game in `build/` again, so you don't need your
 game files for it. Then copy the `Pocket Native` folder onto the card

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Build a game
+Comment=Drop your 3DS games here, or open it to pick them, to build them for the handheld
+Icon=applications-games
+Terminal=true
+Exec=sh -c "d=\\${0#file://}; exec \\"\\${d%%/*}/scripts/build.sh\\" --wait \\"\\$@\\"" %k %F

@@ -1,9 +1,10 @@
 #!/bin/bash
-# build.sh <rom>... [--keys aes_keys.txt] [--out dir]
+# build.sh <rom>... [--keys aes_keys.txt] [--out dir] [--wait]
 #
 # Builds Pocket Native and games for the handheld from your own ROMs,
 # decrypted .3ds/.cci files or .cia files with your console's aes_keys.txt,
-# inside a container (podman or docker). Leaves "Pocket Native" in the output
+# inside a container (podman or docker). With no ROM it asks for them, and
+# --wait waits for Enter at the end. Leaves "Pocket Native" in the output
 # directory, build/ by default, to copy into roms/ports on the card.
 set -euo pipefail
 
@@ -13,10 +14,26 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --keys) keys="$(realpath "$2")"; shift 2 ;;
         --out) out="$(realpath -m "$2")"; shift 2 ;;
-        -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
+        --wait) trap 'code=$?; read -rp "press Enter to close " _ || true; exit $code' EXIT; shift ;;
+        -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
         *) roms+=("$(realpath -m "$1")"); shift ;;
     esac
 done
+
+# a file picker from the desktop's own toolkit, one path a line
+pick() {
+    local title="$1" name="$2" patterns="$3" many="${4:-}"
+    if command -v kdialog >/dev/null && { [ "${XDG_CURRENT_DESKTOP:-}" = KDE ] || ! command -v zenity >/dev/null; }; then
+        kdialog --title "$title" --getopenfilename ${many:+--multiple --separate-output} "$HOME" "$patterns|$name" 2>/dev/null
+    elif command -v zenity >/dev/null; then
+        zenity --file-selection --title="$title" ${many:+--multiple} --file-filter="$name | $patterns" 2>/dev/null | tr '|' '\n'
+    fi
+}
+
+if [ ${#roms[@]} -eq 0 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    mapfile -t roms < <(pick "Pick the games to build" "3DS games" "*.3ds *.cci *.cia *.3DS *.CCI *.CIA" many || true)
+    [ ${#roms[@]} -eq 0 ] && { echo "no game picked"; exit 2; }
+fi
 if [ ${#roms[@]} -eq 0 ]; then
     echo "usage: scripts/build.sh <rom>... [--keys aes_keys.txt] [--out dir]"
     exit 2
@@ -38,12 +55,17 @@ failed=()
 for rom in "${roms[@]}"; do
     mounts=(-v "$repo:/src:ro" -v "$out/.work:/work" -v "$out:/out" -v "$(dirname "$rom"):/rom:ro")
     args=("/rom/$(basename "$rom")")
-    # a .cia takes the keys given, else the aes_keys.txt beside it or in the kit
+    # a .cia takes the keys given, else the aes_keys.txt beside it or in the
+    # kit, else the one picked when asked
     rom_keys="$keys"
     if [ -z "$rom_keys" ] && [[ "${rom,,}" == *.cia ]]; then
         for near in "$(dirname "$rom")/aes_keys.txt" "$repo/aes_keys.txt"; do
             [ -f "$near" ] && { rom_keys="$near"; break; }
         done
+        if [ -z "$rom_keys" ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+            keys=$(pick "A .cia needs your console's aes_keys.txt, pick it" "aes_keys.txt" "aes_keys.txt *.txt" || true)
+            rom_keys="$keys"
+        fi
     fi
     if [ -n "$rom_keys" ]; then
         mounts+=(-v "$(dirname "$rom_keys"):/keys:ro")

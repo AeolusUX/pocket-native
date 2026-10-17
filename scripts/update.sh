@@ -1,8 +1,8 @@
 #!/bin/bash
-# update.sh [--out dir]: brings this kit up to the latest release of Pocket
-# Native, then builds every game already in the output directory, build/ by
-# default, again with it. The kit's old files go in .old. update.sh --check
-# only says whether a new version is out.
+# update.sh [--out dir] [--wait]: brings this kit up to the latest release of
+# Pocket Native, then builds every game already in the output directory,
+# build/ by default, again with it. The kit's old files go in .old. --check
+# only says whether a new version is out, --wait waits for Enter at the end.
 #
 # the braces have bash read all of it before it runs, as it replaces itself
 {
@@ -10,15 +10,26 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 releases="${POCKET_NATIVE_RELEASES:-https://api.github.com/repos/whovian64/pocket-native/releases/latest}"
-check="" out="$repo/build"
+check="" out="$repo/build" wait=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --check) check=1; shift ;;
         --out) out="$(realpath -m "$2")"; shift 2 ;;
+        --wait) wait=1; shift ;;
         -h|--help) sed -n '2,5p' "$0"; exit 0 ;;
         *) echo "usage: scripts/update.sh [--out dir]"; exit 2 ;;
     esac
 done
+
+# games moved out for the build go back however this ends
+staged=""
+finish() {
+    local code=$?
+    [ -n "$staged" ] && restore
+    [ -n "$wait" ] && { read -rp "press Enter to close " _ || true; }
+    exit $code
+}
+trap finish EXIT
 
 current=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$repo/Cargo.toml" | head -1)
 if ! release=$(curl -fsSL -m 10 -H "User-Agent: pocket-native" "$releases" 2>/dev/null); then
@@ -78,7 +89,7 @@ restore() {
     done
 }
 restore
-trap restore EXIT
+staged=1
 trap 'exit 1' HUP INT TERM
 built=("$games"/*/game.3ds)
 if [ ${#built[@]} -eq 0 ]; then
