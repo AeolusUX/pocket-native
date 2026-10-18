@@ -264,7 +264,7 @@ fn main() {
                     let mut canvas = Canvas::new(&font, PANEL);
                     menu.draw(&mut canvas, &settings, &game, &profile, &title);
                     overlay = Some(Arc::new(canvas.finish()));
-                    system.present_panel(layout::areas(settings.layout, settings.swapped), None, overlay.clone(), settings.smooth, false);
+                    system.present_panel(layout::areas(settings.layout, settings.swapped, zakuro_gpu::layout_size()), None, overlay.clone(), settings.smooth, false);
                     menu_drawn = true;
                 }
                 std::thread::sleep(frame);
@@ -407,7 +407,7 @@ fn main() {
                 }
                 (fps, fps_since) = (0, Instant::now());
             }
-            let areas = layout::areas(settings.layout, settings.swapped);
+            let areas = layout::areas(settings.layout, settings.swapped, zakuro_gpu::layout_size());
             let pointer = areas[1].map(|[x, y, width, height]| (x + (cursor.0 * width as f32 / 320.0) as i32, y + (cursor.1 * height as f32 / 240.0) as i32));
             system.present_panel(areas, pointer, overlay.clone(), settings.smooth, interpolating);
         }

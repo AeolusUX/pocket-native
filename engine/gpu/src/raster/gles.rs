@@ -1220,8 +1220,41 @@ impl Kms {
     }
 }
 
-/// the layouts and the menu are made for a 640x480 panel, others get them
-/// scaled to fit and centred.
+/// the size the frontend lays the screens out in, the panel's shape with
+/// its long side across, 480 tall or 640 wide: 640x480 on a 4:3 panel,
+/// 853x480 on a 16:9 one, 640x640 on a square one.
+static LAYOUT: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
+
+pub fn layout_size() -> (u32, u32) {
+    let (width, height) = *LAYOUT.get().unwrap_or(&(640, 480));
+    (width as u32, height as u32)
+}
+
+fn layout_for((width, height): (i32, i32)) -> (i32, i32) {
+    if width * 3 >= height * 4 {
+        ((480 * width + height / 2) / height, 480)
+    } else {
+        (640, (640 * height + width / 2) / width)
+    }
+}
+
+/// the panel's size and the way its picture is turned, none on a landscape
+/// panel.
+fn panel_shape(output: &Output) -> ((i32, i32), Option<i32>) {
+    let size = match output {
+        Output::Kms(kms) => kms.size(),
+        Output::Fbdev(window) => (window[0] as i32, window[1] as i32),
+        Output::Offscreen(_) => (640, 480),
+    };
+    let turn = match output {
+        Output::Kms(_) | Output::Fbdev(_) => panel_turn(size.0, size.1),
+        Output::Offscreen(_) => None,
+    };
+    (size, turn)
+}
+
+/// the layout scaled to fit what it is drawn into and centred, the menu
+/// made for 640x480 in the middle of it.
 #[derive(Clone, Copy)]
 struct Fit {
     scale: f32,
@@ -1230,9 +1263,14 @@ struct Fit {
 }
 
 impl Fit {
-    fn new(width: i32, height: i32) -> Fit {
-        let scale = (width as f32 / 640.0).min(height as f32 / 480.0);
-        Fit { scale, left: (width as f32 - 640.0 * scale) / 2.0, top: (height as f32 - 480.0 * scale) / 2.0 }
+    fn new((width, height): (i32, i32), (into_width, into_height): (i32, i32)) -> Fit {
+        let scale = (into_width as f32 / width as f32).min(into_height as f32 / height as f32);
+        Fit { scale, left: (into_width as f32 - width as f32 * scale) / 2.0, top: (into_height as f32 - height as f32 * scale) / 2.0 }
+    }
+
+    /// the same, from a point of the layout on.
+    fn inset(self, x: i32, y: i32) -> Fit {
+        Fit { left: self.left + x as f32 * self.scale, top: self.top + y as f32 * self.scale, ..self }
     }
 
     fn x(self, x: i32) -> i32 {
@@ -1443,22 +1481,6 @@ fn panel_turn(width: i32, height: i32) -> Option<i32> {
     }
 }
 
-/// the size of the layout the screens are placed in, 640x480 unless
-/// ZAKURO_CANVAS=WIDTHxHEIGHT says otherwise.
-fn canvas_size() -> (i32, i32) {
-    static SIZE: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
-    *SIZE.get_or_init(|| {
-        std::env::var("ZAKURO_CANVAS")
-            .ok()
-            .and_then(|value| {
-                let (width, height) = value.split_once('x')?;
-                Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
-            })
-            .filter(|&(width, height)| width > 0 && height > 0)
-            .unwrap_or((640, 480))
-    })
-}
-
 fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
     disturb();
     PANEL.with(|panel| {
@@ -1483,24 +1505,17 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                     empty
                 }
             };
-            let (panel_width, panel_height, panel_framebuffer) = match &panel.output {
-                Output::Kms(kms) => {
-                    let (width, height) = kms.size();
-                    (width, height, None)
-                }
-                Output::Fbdev(window) => (window[0] as i32, window[1] as i32, None),
-                Output::Offscreen(framebuffer) => (640, 480, Some(*framebuffer)),
+            let ((panel_width, panel_height), turn) = panel_shape(&panel.output);
+            let panel_framebuffer = match &panel.output {
+                Output::Offscreen(framebuffer) => Some(*framebuffer),
+                _ => None,
             };
             // a portrait panel under a landscape layout: everything is drawn
-            // into a canvas of the layout's size, which is turned onto the
-            // panel at the end
-            let turn = match &panel.output {
-                Output::Kms(_) | Output::Fbdev(_) => panel_turn(panel_width, panel_height),
-                Output::Offscreen(_) => None,
-            };
+            // into a canvas the panel's size on its side, which is turned
+            // onto the panel at the end
             let (width, height, framebuffer) = match turn {
                 Some(_) => {
-                    let (canvas_width, canvas_height) = canvas_size();
+                    let (canvas_width, canvas_height) = (panel_height, panel_width);
                     let canvas = match panel.canvas {
                         Some(canvas) if (canvas.width, canvas.height) == (canvas_width, canvas_height) => canvas,
                         _ => {
@@ -1513,7 +1528,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                             let program = link(&gl, PACK_VERTEX_SOURCE, ROTATE_SOURCE)?;
                             let made = Canvas { texture, framebuffer, program, width: canvas_width, height: canvas_height };
                             panel.canvas = Some(made);
-                            log::info!("drawing a {canvas_width}x{canvas_height} layout turned onto the {panel_width}x{panel_height} panel");
+                            log::info!("drawing a {canvas_width}x{canvas_height} picture turned onto the {panel_width}x{panel_height} panel");
                             made
                         }
                     };
@@ -1521,7 +1536,8 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                 }
                 None => (panel_width, panel_height, panel_framebuffer),
             };
-            let fit = Fit::new(width, height);
+            let layout = *LAYOUT.get().unwrap_or(&(640, 480));
+            let fit = Fit::new(layout, (width, height));
             gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
             gl.viewport(0, 0, width, height);
             gl.disable(glow::SCISSOR_TEST);
@@ -1590,7 +1606,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                         (texture, screen, 0, area, smooth)
                     }
                     Part::Overlay(overlay) => {
-                        draw_overlay(&gl, panel, &overlay, height, fit)?;
+                        draw_overlay(&gl, panel, &overlay, height, fit.inset((layout.0 - 640) / 2, (layout.1 - 480) / 2))?;
                         continue;
                     }
                     Part::Pixels { index, pixels, width, height, area, smooth } => {
@@ -2887,6 +2903,10 @@ impl Worker {
                         None => None,
                     };
                     if let Some(output) = output {
+                        let ((width, height), turn) = panel_shape(&output);
+                        let layout = layout_for(if turn.is_some() { (height, width) } else { (width, height) });
+                        let _ = LAYOUT.set(layout);
+                        log::info!("screens laid out in {}x{}", layout.0, layout.1);
                         PANEL.with(|screen| *screen.borrow_mut() = Some(Panel { egl, output, program: None, textures: [None, None], empty: None, linear: None, overlay: None, overlay_textures: HashMap::new(), between: Between::default(), canvas: None }));
                     }
                     let gl: &'static glow::Context = Box::leak(Box::new(gl));
