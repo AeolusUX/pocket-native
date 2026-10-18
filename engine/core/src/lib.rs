@@ -639,6 +639,7 @@ impl System {
         // both LCDs finish scanning out, in that order.
         services::gsp::signal_interrupt(self, services::gsp::InterruptId::Pdc0);
         services::gsp::signal_interrupt(self, services::gsp::InterruptId::Pdc1);
+        services::cam::frame(self);
 
     }
 
