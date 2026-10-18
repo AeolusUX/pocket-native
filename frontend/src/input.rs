@@ -20,6 +20,7 @@ pub const L2: u16 = 312;
 pub const R2: u16 = 313;
 pub const SELECT: u16 = 704;
 pub const START: u16 = 705;
+pub const L3: u16 = 706;
 pub const R3: u16 = 707;
 pub const FN: u16 = 708;
 pub const UP: u16 = 544;
@@ -145,7 +146,7 @@ fn h700_button(code: u16) -> u16 {
         310 => SELECT,
         311 => START,
         312 => FN,
-        313 => 706,
+        313 => L3,
         314 => L2,
         315 => R2,
         316 => R3,
@@ -159,7 +160,7 @@ fn rk3566_button(code: u16) -> u16 {
         314 => SELECT,
         315 => START,
         316 => FN,
-        317 => 706,
+        317 => L3,
         318 => R3,
         other => other,
     }
@@ -186,6 +187,7 @@ pub fn parse_keys(spec: &str) -> Vec<(u64, HashSet<u16>)> {
         "R1" => Some(R1),
         "L2" => Some(L2),
         "R2" => Some(R2),
+        "L3" => Some(L3),
         "SELECT" => Some(SELECT),
         "START" => Some(START),
         "FN" => Some(FN),

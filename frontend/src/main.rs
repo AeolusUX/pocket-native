@@ -4,10 +4,11 @@
 //!
 //! ZAKURO_KMS=1 ZAKURO_RECOMPILED=title.so ZAKURO_DATA=dir pocket-native <rom>
 //!
-//! A tap of FN opens the menu, FN+Start quits, a tap of L2 or FN+L1 swaps
-//! the screens, FN+R1 shows both or one big, the right stick moves the touch
-//! cursor and R2 touches, or tilts the console with L2 held. Reset in the
-//! menu exits with 3, for the launcher to start the game again.
+//! A tap of FN, or L3 and R2 together, opens the menu, FN+Start quits, a tap
+//! of L2 or FN+L1 swaps the screens, FN+R1 shows both or one big, the right
+//! stick moves the touch cursor and R2 touches, or tilts the console with L2
+//! held. Reset in the menu exits with 3, for the launcher to start the game
+//! again.
 //!
 //! pocket-native --probe <rom> [frames] tries a game as fast as it runs and
 //! writes a report of how it went, see probe.rs.
@@ -33,7 +34,7 @@ use zakuro_core::{loader, Config, FrameOutcome, System};
 use zakuro_gpu::Overlay;
 
 use crate::font::{Canvas, Font};
-use crate::input::{Pad, FN, L1, L2, R1, R2, R3, START};
+use crate::input::{Pad, FN, L1, L2, L3, R1, R2, R3, START};
 use crate::menu::{Action, Menu, Status};
 use crate::profile::Profile;
 use crate::settings::{Advanced, GameSettings, Layout, Power, Settings};
@@ -221,6 +222,8 @@ fn main() {
         }
         let tapped = fn_alone && held.contains(&FN) && !keys.contains(&FN);
         fn_alone &= !tapped;
+        // L3 and R2 together do the same, for handhelds with no FN
+        let tapped = tapped || [L3, R2].iter().all(|key| keys.contains(key)) && ![L3, R2].iter().all(|key| held.contains(key));
 
         if menu.open || tapped {
             let action = if !menu.open {
