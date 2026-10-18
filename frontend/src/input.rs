@@ -54,7 +54,7 @@ pub fn gamepad() -> Option<(String, String)> {
     let devices = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
     devices.split("\n\n").find_map(|block| {
         let name = block.lines().find_map(|line| line.strip_prefix("N: Name="))?;
-        if !name.contains("Gamepad") && !name.contains("Controller") && !name.contains("Joypad") {
+        if !name.contains("Gamepad") && !name.contains("Controller") && !name.contains("Joypad") && !h700_pad(name) {
             return None;
         }
         let handlers = block.lines().find_map(|line| line.strip_prefix("H: Handlers="))?;
@@ -63,10 +63,15 @@ pub fn gamepad() -> Option<(String, String)> {
     })
 }
 
+/// Anbernic's H700 handhelds, which number their buttons another way and
+/// give the d-pad as a hat.
+fn h700_pad(name: &str) -> bool {
+    name == "Deeplay-keys" || name == "ANBERNIC-keys" || (name.starts_with("Anbernic RG") && !name.contains("ARC"))
+}
+
 pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
-    // Anbernic's H700 handhelds number their buttons another way and give
-    // the d-pad as a hat, they come in as the R36S's
-    let h700 = name == "Deeplay-keys" || name == "ANBERNIC-keys" || (name.starts_with("Anbernic RG") && !name.contains("ARC"));
+    // they come in as the R36S's
+    let h700 = h700_pad(&name);
     log::info!("buttons from {name}{}", if h700 { ", numbered as on Anbernic's H700 handhelds" } else { "" });
     std::thread::spawn(move || {
         let Ok(mut device) = std::fs::File::open(&path) else {
