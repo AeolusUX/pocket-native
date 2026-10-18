@@ -54,7 +54,8 @@ pub struct Pad {
 pub fn gamepad() -> Option<(String, String)> {
     let devices = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
     devices.split("\n\n").find_map(|block| {
-        let name = block.lines().find_map(|line| line.strip_prefix("N: Name="))?;
+        // the name comes in quotes
+        let name = block.lines().find_map(|line| line.strip_prefix("N: Name="))?.trim_matches('"');
         if !name.contains("Gamepad") && !name.contains("Controller") && !name.contains("Joypad") && !name.contains("joypad") && !h700_pad(name) && !rk3562_pad(name) {
             return None;
         }
