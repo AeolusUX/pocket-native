@@ -1220,6 +1220,36 @@ impl Kms {
     }
 }
 
+/// the layouts and the menu are made for a 640x480 panel, others get them
+/// scaled to fit and centred.
+#[derive(Clone, Copy)]
+struct Fit {
+    scale: f32,
+    left: f32,
+    top: f32,
+}
+
+impl Fit {
+    fn new(width: i32, height: i32) -> Fit {
+        let scale = (width as f32 / 640.0).min(height as f32 / 480.0);
+        Fit { scale, left: (width as f32 - 640.0 * scale) / 2.0, top: (height as f32 - 480.0 * scale) / 2.0 }
+    }
+
+    fn x(self, x: i32) -> i32 {
+        (self.left + x as f32 * self.scale).round() as i32
+    }
+
+    fn y(self, y: i32) -> i32 {
+        (self.top + y as f32 * self.scale).round() as i32
+    }
+
+    /// left, top, width and height.
+    fn area(self, [left, top, width, height]: [i32; 4]) -> [i32; 4] {
+        let (x, y) = (self.x(left), self.y(top));
+        [x, y, self.x(left + width) - x, self.y(top + height) - y]
+    }
+}
+
 enum Part {
     Cursor { x: i32, y: i32 },
     /// a screen's buffer, the top one's version when it is interpolated.
@@ -1257,7 +1287,7 @@ void main() {
 /// draws a user interface over the screens, its textures made the first time
 /// they come and kept by their id.
 /// SAFETY: on the GL thread, with the panel's framebuffer bound
-unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::Overlay, (width, height): (i32, i32)) -> Result<(), String> {
+unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::Overlay, height: i32, fit: Fit) -> Result<(), String> {
     let (program, array, vertices, indices) = match panel.overlay {
         Some(made) => made,
         None => {
@@ -1308,9 +1338,10 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
             gl.delete_texture(texture);
         }
     }
-    gl.viewport(0, 0, width, height);
+    let [x, y, width, tall] = fit.area([0, 0, 640, 480]);
+    gl.viewport(x, height - y - tall, width, tall);
     gl.use_program(Some(program));
-    gl.uniform_2_f32(gl.get_uniform_location(program, "size").as_ref(), width as f32, height as f32);
+    gl.uniform_2_f32(gl.get_uniform_location(program, "size").as_ref(), 640.0, 480.0);
     gl.uniform_1_i32(gl.get_uniform_location(program, "source").as_ref(), 0);
     gl.bind_vertex_array(Some(array));
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
@@ -1323,6 +1354,7 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
     for mesh in &overlay.meshes {
         let Some(&(texture, _)) = panel.overlay_textures.get(&mesh.texture) else { continue };
         let [left, top, right, bottom] = mesh.clip.map(|edge| edge as i32);
+        let [left, top, right, bottom] = [fit.x(left), fit.y(top), fit.x(right), fit.y(bottom)];
         gl.scissor(left, height - bottom, right - left, bottom - top);
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         let bytes = std::slice::from_raw_parts(mesh.vertices.as_ptr().cast::<u8>(), std::mem::size_of_val(mesh.vertices.as_slice()));
@@ -1394,6 +1426,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                 }
                 Output::Offscreen(framebuffer) => (640, 480, Some(*framebuffer)),
             };
+            let fit = Fit::new(width, height);
             gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
             gl.viewport(0, 0, width, height);
             gl.disable(glow::SCISSOR_TEST);
@@ -1423,8 +1456,9 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
             for part in parts {
                 let (texture, screen, upright, area, smooth) = match part {
                     Part::Cursor { x, y } => {
+                        let (x, y) = (fit.x(x), fit.y(y));
                         gl.enable(glow::SCISSOR_TEST);
-                        for (size, shade) in [(7, 0.0), (5, 1.0)] {
+                        for (size, shade) in [(7, 0.0), (5, 1.0)].map(|(size, shade)| ((size as f32 * fit.scale) as i32 | 1, shade)) {
                             gl.scissor(x - size / 2, height - y - size / 2, size, size);
                             gl.clear_color(shade, shade, shade, 1.0);
                             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -1433,6 +1467,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                         continue;
                     }
                     Part::Surface { texture, screen, area, smooth, top, picture } => {
+                        let area = fit.area(area);
                         let step = match picture {
                             Some(version) => panel.between.step((texture, version)),
                             None => {
@@ -1460,7 +1495,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                         (texture, screen, 0, area, smooth)
                     }
                     Part::Overlay(overlay) => {
-                        draw_overlay(&gl, panel, &overlay, (width, height))?;
+                        draw_overlay(&gl, panel, &overlay, height, fit)?;
                         continue;
                     }
                     Part::Pixels { index, pixels, width, height, area, smooth } => {
@@ -1482,7 +1517,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                         };
                         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                         gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&pixels)));
-                        (texture, [width as i32, height as i32, 0, 0], 1, area, smooth)
+                        (texture, [width as i32, height as i32, 0, 0], 1, fit.area(area), smooth)
                     }
                 };
                 let y = height - area[1] - area[3];
