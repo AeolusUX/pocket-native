@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 
 use zakuro_core::services::hid::PadState;
@@ -48,7 +49,8 @@ pub struct Pad {
     pub axes: [i32; 8],
 }
 
-pub fn gamepad() -> Option<String> {
+/// the handheld's gamepad device and its name.
+pub fn gamepad() -> Option<(String, String)> {
     let devices = std::fs::read_to_string("/proc/bus/input/devices").ok()?;
     devices.split("\n\n").find_map(|block| {
         let name = block.lines().find_map(|line| line.strip_prefix("N: Name="))?;
@@ -57,16 +59,21 @@ pub fn gamepad() -> Option<String> {
         }
         let handlers = block.lines().find_map(|line| line.strip_prefix("H: Handlers="))?;
         let event = handlers.split_whitespace().find(|handler| handler.starts_with("event"))?;
-        Some(format!("/dev/input/{event}"))
+        Some((format!("/dev/input/{event}"), name.to_owned()))
     })
 }
 
-pub fn read_pad(path: String, pad: Arc<Mutex<Pad>>) {
+pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
+    // Anbernic's H700 handhelds number their buttons another way and give
+    // the d-pad as a hat, they come in as the R36S's
+    let h700 = name == "Deeplay-keys" || name == "ANBERNIC-keys" || (name.starts_with("Anbernic RG") && !name.contains("ARC"));
+    log::info!("buttons from {name}{}", if h700 { ", numbered as on Anbernic's H700 handhelds" } else { "" });
     std::thread::spawn(move || {
         let Ok(mut device) = std::fs::File::open(&path) else {
             log::error!("could not open {path}");
             return;
         };
+        let ranges: [Option<(i32, i32)>; 6] = std::array::from_fn(|axis| h700.then(|| axis_range(&device, axis)).flatten());
         let mut event = [0u8; 24];
         while device.read_exact(&mut event).is_ok() {
             let kind = u16::from_ne_bytes([event[16], event[17]]);
@@ -74,17 +81,63 @@ pub fn read_pad(path: String, pad: Arc<Mutex<Pad>>) {
             let value = i32::from_ne_bytes([event[20], event[21], event[22], event[23]]);
             let mut pad = pad.lock().unwrap();
             match kind {
-                1 if value == 0 => {
-                    pad.keys.remove(&code);
-                }
                 1 => {
-                    pad.keys.insert(code);
+                    let code = if h700 { h700_button(code) } else { code };
+                    if value == 0 {
+                        pad.keys.remove(&code);
+                    } else {
+                        pad.keys.insert(code);
+                    }
+                }
+                3 if h700 && matches!(code, 16 | 17) => {
+                    let (less, more) = if code == 16 { (LEFT, RIGHT) } else { (UP, DOWN) };
+                    pad.keys.remove(&less);
+                    pad.keys.remove(&more);
+                    if value != 0 {
+                        pad.keys.insert(if value < 0 { less } else { more });
+                    }
+                }
+                // the sticks on axes 2 and 3, 4 and 5, scaled to the R36S's travel
+                3 if h700 => {
+                    if let Some(axis) = [None, None, Some(0), Some(1), Some(3), Some(4)].get(code as usize).copied().flatten() {
+                        pad.axes[axis] = match ranges[code as usize] {
+                            Some((least, most)) => ((2 * value - least - most) as f32 / (most - least) as f32 * STICK) as i32,
+                            None => value,
+                        };
+                    }
                 }
                 3 if (code as usize) < pad.axes.len() => pad.axes[code as usize] = value,
                 _ => {}
             }
         }
     });
+}
+
+/// an H700 handheld's button as the R36S numbers it.
+fn h700_button(code: u16) -> u16 {
+    match code {
+        304 => A,
+        305 => B,
+        306 => Y,
+        308 => L1,
+        309 => R1,
+        310 => SELECT,
+        311 => START,
+        312 => FN,
+        313 => 706,
+        314 => L2,
+        315 => R2,
+        316 => R3,
+        other => other,
+    }
+}
+
+/// an axis's least and most, as the device gives them.
+fn axis_range(device: &std::fs::File, axis: usize) -> Option<(i32, i32)> {
+    let mut info = [0i32; 6];
+    // SAFETY: EVIOCGABS fills the six numbers of the axis's input_absinfo
+    let read = unsafe { libc::ioctl(device.as_raw_fd(), (0x8018_4540 + axis) as _, info.as_mut_ptr()) };
+    (read >= 0 && info[2] > info[1]).then_some((info[1], info[2]))
 }
 
 /// ZAKURO_KEYS=tick:KEY+KEY,... holds the handheld's keys by name from each

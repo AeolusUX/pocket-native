@@ -138,7 +138,7 @@ fn main() {
     let read_ahead = readahead::ReadAhead::start(&path, &data, advanced.read_ahead);
     let pad = Arc::new(Mutex::new(Pad::default()));
     match input::gamepad().filter(|_| std::env::var_os("ZAKURO_INPUT").is_none() && probe.is_none()) {
-        Some(device) => input::read_pad(device, pad.clone()),
+        Some((device, name)) => input::read_pad(device, name, pad.clone()),
         None => log::warn!("no gamepad found"),
     }
     let (sound, samples) = mpsc::channel();
