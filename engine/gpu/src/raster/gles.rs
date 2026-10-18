@@ -1368,7 +1368,12 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
     Ok(())
 }
 
+/// held while the GL thread or the compiler thread compiles: Mali's driver
+/// on the RX6H crashed in the compiler thread with both at it.
+static COMPILER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn link(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
+    let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // SAFETY: on the GL thread, the shaders are deleted once linked
     unsafe {
         let program = gl.create_program()?;
@@ -2619,6 +2624,7 @@ type ProgramKey = ([u32; FRAGMENT_CONSTANTS], bool, Vec<u32>, u64);
 /// when it was made before, its samplers on the texture units.
 fn build_program(gl: &glow::Context, vertex: &str, fragment: &str, cached: Option<&std::path::Path>) -> Result<glow::Program, String> {
     let started = std::time::Instant::now();
+    let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // SAFETY: the context is current on this thread, the shaders are deleted
     // once linked into the program
     unsafe {
@@ -3276,6 +3282,7 @@ impl Gles {
 
     fn compute(&self, source: &str) -> Result<glow::Program, String> {
         let gl = &self.gl;
+        let _compiling = COMPILER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // SAFETY: the context is current, the shader is deleted once linked
         unsafe {
             let program = gl.create_program()?;
