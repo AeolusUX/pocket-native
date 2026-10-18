@@ -586,19 +586,14 @@ impl System {
 
     /// the earliest tick any blocked thread or armed timer wants to wake at.
     fn next_wakeup(&self) -> Option<u64> {
-        let threads = self
-            .kernel
-            .threads
-            .iter()
-            .filter(|t| t.status.is_blocked())
-            .filter_map(|t| t.wakeup_at);
+        let threads = self.kernel.next_thread_wakeup();
         let timers = self.kernel.objects.iter().filter_map(|(_, object)| {
             match object {
                 kernel::object::KObject::Timer(timer) => timer.fire_at,
                 _ => None,
             }
         });
-        threads.chain(timers).min()
+        threads.into_iter().chain(timers).min()
     }
 
     /// everything that happens between frames, vertical blank, input, clock.
