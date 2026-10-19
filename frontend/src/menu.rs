@@ -62,7 +62,7 @@ const TOGGLES: [(&str, fn(&mut Advanced) -> &mut bool, [&str; 2], &str); 31] = [
     ("Depth tiles on the GPU", |a| &mut a.tile_copies, ON_OFF, "Moves depth between buffers on the GPU. Try Off if shadows, fog or outlines go wrong."),
     ("Clears on the GPU", |a| &mut a.gpu_clears, ON_OFF, "Clears whole buffers on the GPU alone. Try Off for leftover pictures or black screens."),
     ("Vertex arrays on the GPU", |a| &mut a.gpu_arrays, ON_OFF, "Keeps shapes in GPU memory. Try Off if shapes flicker or break apart."),
-    ("Trust cached meshes", |a| &mut a.trust_meshes, ON_OFF, "Reuses shapes for a few pictures without reading them again. Try Off if trees, grass or characters flicker or lag."),
+    ("Trust cached meshes", |a| &mut a.trust_meshes, ON_OFF, "Reuses shapes for a few pictures without reading them again. Try Off if things flicker, lag or menus glitch."),
     ("Trust cached textures", |a| &mut a.trust_textures, ON_OFF, "Reuses textures for a few pictures without reading them again. Try Off if a texture is late to change."),
     ("Small texture cache", |a| &mut a.small_cache, ON_OFF, "Keeps a quarter of the textures, to save memory. Try Off if busy scenes stutter."),
     ("Hide scenery out of view", |a| &mut a.cull, ON_OFF, "Skips big shapes that were not on screen a moment ago. Try Off if things pop in or flicker at the edges."),
