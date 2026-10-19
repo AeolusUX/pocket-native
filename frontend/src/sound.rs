@@ -20,25 +20,46 @@ pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
             let write: libloading::Symbol<unsafe extern "C" fn(*mut u8, *const u8, u64) -> i64> = alsa.get(b"snd_pcm_writei\0").unwrap();
             let recover: libloading::Symbol<unsafe extern "C" fn(*mut u8, i32, i32) -> i32> = alsa.get(b"snd_pcm_recover\0").unwrap();
             let delay: libloading::Symbol<unsafe extern "C" fn(*mut u8, *mut i64) -> i32> = alsa.get(b"snd_pcm_delay\0").unwrap();
+            let get: libloading::Symbol<unsafe extern "C" fn(*mut u8, *mut u64, *mut u64) -> i32> = alsa.get(b"snd_pcm_get_params\0").unwrap();
             let mut pcm = std::ptr::null_mut();
             if open(&mut pcm, b"default\0".as_ptr(), 0, 0) < 0 || set(pcm, 2, 3, 2, AUDIO_SAMPLE_RATE.round() as u32, 1, 150_000) < 0 {
                 log::warn!("could not open the sound device, playing without sound");
                 for _ in samples {}
                 return;
             }
-            let target = AUDIO_SAMPLE_RATE * 0.1;
+            let (mut buffer, mut period) = (0, 0);
+            get(pcm, &mut buffer, &mut period);
+            log::info!("sound at {} Hz, the device buffering {buffer} samples in periods of {period}", AUDIO_SAMPLE_RATE.round());
+            let target = AUDIO_SAMPLE_RATE * 0.15;
+            // over a second behind, drop the oldest
+            let most = AUDIO_SAMPLE_RATE as usize;
             let mut stretch = Stretch::default();
             let mut ratio = 1.0f64;
             let mut chunk = Vec::new();
-            for samples in samples {
+            let mut writes = 0u32;
+            while let Ok(mut input) = samples.recv() {
+                while let Ok(more) = samples.try_recv() {
+                    input.extend(more);
+                }
                 let mut queued = 0i64;
                 if delay(pcm, &mut queued) < 0 {
                     queued = 0;
                 }
-                let wanted = (1.0 + (target - queued as f64) / target).clamp(0.75, 2.5);
+                let waiting = stretch.waiting() + input.len() + queued.max(0) as usize;
+                if waiting > most {
+                    let over = (waiting - most).min(input.len());
+                    input.drain(..over);
+                    log::info!("sound fell {:.1} s behind, dropped {:.1} s of it", waiting as f64 / AUDIO_SAMPLE_RATE, over as f64 / AUDIO_SAMPLE_RATE);
+                }
+                let waiting = stretch.waiting() + input.len() + queued.max(0) as usize;
+                writes += 1;
+                if writes == 300 {
+                    log::info!("sound {queued} samples in the device, {waiting} waiting all told, played {ratio:.2} times as long");
+                }
+                let wanted = (1.0 + (target - waiting as f64) / target).clamp(0.75, 2.5);
                 ratio += (wanted - ratio) * 0.1;
                 chunk.clear();
-                stretch.push(&samples, ratio, &mut chunk);
+                stretch.push(&input, ratio, &mut chunk);
                 let mut done = 0;
                 while done < chunk.len() {
                     let written = write(pcm, chunk[done..].as_ptr().cast(), (chunk.len() - done) as u64);
@@ -71,6 +92,10 @@ struct Stretch {
 }
 
 impl Stretch {
+    fn waiting(&self) -> usize {
+        self.input.len().saturating_sub(self.at as usize)
+    }
+
     fn push(&mut self, samples: &[[i16; 2]], ratio: f64, out: &mut Vec<[i16; 2]>) {
         self.input.extend(samples.iter().map(|&[l, r]| [l as f32, r as f32]));
         let step = HOP as f64 / ratio;
