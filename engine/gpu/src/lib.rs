@@ -1094,11 +1094,22 @@ impl Gpu {
         }
     }
 
-    /// folds a command list into the picture's hash, in fast mode.
+    /// folds a command list into the picture's hash, in fast mode, while
+    /// bottom screen skipping can still use it. four lanes at once.
     fn hash_words(&mut self, words: &[u32]) {
-        if fast() {
-            self.picture_hash = words.iter().fold(self.picture_hash, |hash, &word| (hash.rotate_left(5) ^ word as u64).wrapping_mul(0x517c_c1b7_2722_0a95));
+        if !fast() || !self.skip_bottom || self.both_screens {
+            return;
         }
+        let step = |hash: u64, word: u32| (hash.rotate_left(5) ^ word as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+        let (blocks, rest) = words.as_chunks::<4>();
+        let mut lanes = [self.picture_hash, 1, 2, 3];
+        for block in blocks {
+            for (lane, &word) in lanes.iter_mut().zip(block) {
+                *lane = step(*lane, word);
+            }
+        }
+        let hash = lanes.into_iter().fold(0, |hash, lane| step(hash, lane as u32) ^ lane);
+        self.picture_hash = rest.iter().fold(hash, |hash, &word| step(hash, word));
     }
 
     /// the screen and the buffer of it a range of memory overlaps most, of
