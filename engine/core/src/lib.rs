@@ -1036,6 +1036,7 @@ impl System {
         let forced = self.panel.0 != layout || self.panel.1 >= 5;
         self.panel = (layout, if forced { 0 } else { self.panel.1 + 1 });
         let presents = self.gpu_queue.as_ref().map(|queue| queue.presents.clone());
+        let frame = self.frames;
         if let Some(presents) = &presents {
             let mut tries = 0;
             while presents.load(Ordering::Acquire) > 0 {
@@ -1056,6 +1057,7 @@ impl System {
             }
             gpu.presented = state;
             gpu.shown += 1;
+            let frames = frame.saturating_sub(std::mem::replace(&mut gpu.presented_frame, frame)).min(4) as u32;
             let mut shown = [None, None];
             for (index, screen) in [zakuro_common::Screen::Top, zakuro_common::Screen::Bottom].into_iter().enumerate() {
                 let Some(area) = areas[index] else { continue };
@@ -1065,7 +1067,7 @@ impl System {
                 };
                 shown[index] = Some((image, area));
             }
-            gpu.present_panel(shown, cursor, overlay, smooth, interpolate);
+            gpu.present_panel(shown, cursor, overlay, smooth, interpolate, frames);
             if let Some(presents) = presents {
                 presents.fetch_sub(1, Ordering::AcqRel);
             }
