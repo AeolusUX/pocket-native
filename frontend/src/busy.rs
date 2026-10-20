@@ -51,6 +51,8 @@ impl Busy {
         }
         used.sort_by(|a, b| b.0.cmp(&a.0));
         let mut out: Vec<String> = used.iter().take(4).map(|(ticks, name)| format!("{name} {:.0}%", *ticks as f64 / seconds)).collect();
+        let waited = zakuro_core::GPU_WAITED.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        out.push(format!("waiting on gpu {:.0}%", waited / seconds * 100.0));
         if let Some(gpu) = &self.gpu {
             let (sum, count) = (gpu.0.swap(0, Ordering::Relaxed), gpu.1.swap(0, Ordering::Relaxed));
             if count > 0 {
