@@ -18,6 +18,15 @@ use crate::texture::TextureFormat;
 use crate::shader::{self, ShaderUnit, Vec4};
 use crate::{format::ColorFormat, GpuMemory};
 
+/// values' little-endian bytes in one go.
+pub(crate) fn le_bytes<const N: usize, T: Copy>(values: &[T], bytes: impl Fn(T) -> [u8; N]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * N);
+    for &value in values {
+        out.extend_from_slice(&bytes(value));
+    }
+    out
+}
+
 /// reads a float24-encoded viewport register.
 pub(crate) fn read_float24(registers: &[u32], index: usize) -> f32 {
     crate::shader::isa::decode_float24(registers[index])
@@ -1905,9 +1914,9 @@ pub fn draw<M: GpuMemory>(
             let rebased: Option<(Arc<[u32]>, Arc<[u8]>)> = (indexed && crate::fast_with(crate::speedup::MESHES)).then(|| {
                 let rebased: Arc<[u32]> = indices.iter().map(|&index| index - range.0).collect();
                 let bytes: Arc<[u8]> = if range.1 - range.0 <= 0xFFFF {
-                    rebased.iter().flat_map(|&index| (index as u16).to_le_bytes()).collect()
+                    le_bytes(&rebased, |index| (index as u16).to_le_bytes()).into()
                 } else {
-                    rebased.iter().flat_map(|index| index.to_le_bytes()).collect()
+                    le_bytes(&rebased, u32::to_le_bytes).into()
                 };
                 (rebased, bytes)
             });

@@ -667,7 +667,8 @@ fn generic_constants(constants: &[u32; FRAGMENT_CONSTANTS]) -> [u32; FRAGMENT_CO
 fn lighting_shape(words: &[u32]) -> Vec<u32> {
     let w = &words[LIGHTING_BASE..];
     let count = w[1] as usize;
-    let mut shape = vec![w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]];
+    let mut shape = Vec::with_capacity(29 + count * 2);
+    shape.extend_from_slice(&w[..8]);
     for i in 0..7 {
         shape.extend([w[8 + i * 4], w[9 + i * 4], w[10 + i * 4]]);
     }
@@ -4717,7 +4718,7 @@ impl Gles {
         let base = proctex::REG_CONFIG;
         words.extend([r[base], r[base + 1], r[base + 2], r[base + 3], r[base + 4], r[base + 5], 0, 0]);
         words.extend(color_words(r));
-        let uniform_bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let uniform_bytes = super::le_bytes(&words, u32::to_le_bytes);
 
         let mut constants = [0u32; FRAGMENT_CONSTANTS];
         for (i, base) in STAGE_REGISTERS.into_iter().enumerate() {
@@ -4848,9 +4849,9 @@ impl Gles {
                     _ => {
                         let range = shading.indices[..kept].iter().fold((u32::MAX, 0), |(low, high), &index| (low.min(index), high.max(index)));
                         let indices: Vec<u8> = if range.1 <= 0xFFFF {
-                            shading.indices[..kept].iter().flat_map(|&index| (index as u16).to_le_bytes()).collect()
+                            super::le_bytes(&shading.indices[..kept], |index| (index as u16).to_le_bytes())
                         } else {
-                            shading.indices[..kept].iter().flat_map(|index| index.to_le_bytes()).collect()
+                            super::le_bytes(&shading.indices[..kept], u32::to_le_bytes)
                         };
                         (indices, range, None)
                     }
@@ -4940,7 +4941,7 @@ impl Gles {
         words.extend([depth_map.scale.to_bits(), depth_map.offset.to_bits(), 0, 0]);
         let (x, y, width, height) = shading.viewport;
         words.extend([x, y, width, height].map(f32::to_bits));
-        let uniforms = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let uniforms = super::le_bytes(&words, u32::to_le_bytes);
         let mut inputs = Vec::with_capacity((shading.inputs.len() * registers.len()).max(1) * 16);
         for input in shading.inputs {
             for &register in &registers {
