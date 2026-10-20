@@ -13,6 +13,7 @@
 //! pocket-native --probe <rom> [frames] tries a game as fast as it runs and
 //! writes a report of how it went, see probe.rs.
 
+mod busy;
 mod font;
 mod input;
 mod layout;
@@ -201,6 +202,7 @@ fn main() {
     let mut frame_number = 0u64;
     let (mut counted_transfers, mut counted_top, mut counted_bottom, mut counted_shown) = (0u64, 0u64, 0u64, 0u64);
     let (mut counted, mut rendered, mut since) = (0u32, 0u32, Instant::now());
+    let mut busy = busy::Busy::start();
     let mut logs = 0u32;
     // ZAKURO_SLOW_FRAMES=ms logs every frame that took longer to run
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
@@ -373,13 +375,14 @@ fn main() {
             let (transfers, top, bottom, shown) = (system.transfers(), system.top_pictures(), system.bottom_pictures(), system.shown());
             let (read_us, read_bytes) = zakuro_core::services::fs::rom_reads();
             log::info!(
-                "speed {speed:.0}%, rendered {rendered} of 300 frames, {} transfers, {} top pictures, {} bottom, rom {}ms/{}KiB, {} shown",
+                "speed {speed:.0}%, rendered {rendered} of 300 frames, {} transfers, {} top pictures, {} bottom, rom {}ms/{}KiB, {} shown, {}",
                 transfers - counted_transfers,
                 top - counted_top,
                 bottom - counted_bottom,
                 read_us / 1000,
                 read_bytes / 1024,
-                shown - counted_shown
+                shown - counted_shown,
+                busy.report()
             );
             (counted_transfers, counted_top, counted_bottom, counted_shown) = (transfers, top, bottom, shown);
             (counted, rendered, since) = (0, 0, Instant::now());
