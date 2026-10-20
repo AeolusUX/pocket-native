@@ -295,6 +295,11 @@ pub struct Gpu {
     /// a title drawing both screens between two transfers, whose bottom
     /// screen is never skipped, as that would take the top one with it.
     both_screens: bool,
+    /// when a skipped bottom picture went to the top
+    both_at: Option<u64>,
+    /// bottom screen skipping back on a while after that, for titles doing
+    /// it only around their title screen.
+    pub bottom_relearn: bool,
     /// the bottom screen drawn with every picture while it changes, not
     /// every other one.
     pub bottom_full_rate: bool,
@@ -390,6 +395,8 @@ impl Gpu {
             skipping_frame: false,
             skipped_targets: Vec::new(),
             both_screens: false,
+            both_at: None,
+            bottom_relearn: false,
             bottom_full_rate: false,
             #[cfg(feature = "gles")]
             panel: None,
@@ -639,6 +646,7 @@ impl Gpu {
         if self.skipped_bottom && from_skipped && shown_on == Some(0) && !self.both_screens {
             log::info!("switch: bottom screen skipping off, a skipped picture went to the top screen");
             self.both_screens = true;
+            self.both_at = Some(self.transfers);
         }
         if let Some((0, buffer)) = reached {
             let right = self.right_buffers.contains(&buffer);
@@ -1238,6 +1246,10 @@ impl Gpu {
     /// bottom screen a picture by display transfer, which some never do, nor
     /// for a title drawing both screens between transfers.
     fn skips_bottom(&mut self) -> bool {
+        if self.bottom_relearn && self.both_at.is_some_and(|at| self.transfers - at >= 300) {
+            log::info!("switch: bottom screen skipping back on");
+            (self.both_screens, self.both_at) = (false, None);
+        }
         if !fast() || !self.skip_bottom || self.bottom_shown.is_none() || self.both_screens {
             return false;
         }

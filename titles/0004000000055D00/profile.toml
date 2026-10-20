@@ -1,0 +1,4 @@
+name = "Pokémon X"
+
+# its title screen sends one bottom sized picture to the top
+bottom_relearn = true
