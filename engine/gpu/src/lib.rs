@@ -223,6 +223,7 @@ pub struct Gpu {
     /// where a command list asked execution to continue, as (physical
     /// address, size in bytes), taken once the current command finishes.
     pending_jump: Option<(u32, u32)>,
+    list: Vec<u32>,
 
     /// one config per screen, index 0 is the top screen, 1 the bottom.
     pub framebuffers: [FramebufferConfig; 2],
@@ -360,6 +361,7 @@ impl Gpu {
             fixed_attribute_words: 0,
             immediate: Immediate::default(),
             pending_jump: None,
+            list: Vec::new(),
             framebuffers: [FramebufferConfig::default(); 2],
             screen_buffers: Vec::new(),
             stale: [Vec::new(), Vec::new()],
@@ -880,6 +882,10 @@ impl Gpu {
         let start = std::time::Instant::now();
         self.resources.textures.begin_list();
         self.run_command_list(memory, renderer, paddr, size);
+        #[cfg(feature = "gles")]
+        if let Some(hardware) = self.resources.hardware.as_ref() {
+            hardware.flush_draws();
+        }
         self.busy += start.elapsed();
     }
 
@@ -989,7 +995,8 @@ impl Gpu {
         paddr: u32,
         size: u32,
     ) {
-        let mut words = read_command_buffer(memory, paddr, size);
+        let mut words = std::mem::take(&mut self.list);
+        read_command_buffer(memory, paddr, size, &mut words);
         self.hash_words(&words);
         // buffers jump into each other, and a buffer jumping to itself
         // would never end, real lists stay far below this.
@@ -1021,25 +1028,34 @@ impl Gpu {
 
             self.write_internal(memory, renderer, register, data, mask);
 
-            // a burst of uniforms or program words into the vertex shader,
-            // the most of what a list carries, goes to the units directly
+            // a burst into one register, uniforms, program words and light
+            // tables the most of what a list carries, goes to the units
+            // directly
             let offset = register.wrapping_sub(REG_VS_BLOCK);
             let uniforms = matches!(offset, SHADER_UNIFORM_DATA..=SHADER_UNIFORM_DATA_END);
             let program = matches!(offset, SHADER_PROGRAM_DATA..=SHADER_PROGRAM_DATA_END);
-            if extra > 0 && !consecutive && mask == 0xF && (uniforms || program) && self.immediate.vertices.is_empty() {
+            let table = (lighting::REG_TABLE_DATA..=lighting::REG_TABLE_DATA_END).contains(&register);
+            if extra > 0 && !consecutive && mask == 0xF && (uniforms || program || table || !ACTS[register]) && self.immediate.vertices.is_empty() {
                 let end = (index + extra).min(words.len());
-                let mirror = program && self.internal[REG_VS_COM_MODE] & 1 == 0;
-                for &value in &words[index..end] {
-                    configure_shader(&mut self.vertex_shader, offset, value);
-                    if mirror {
-                        configure_shader(&mut self.geometry_shader, offset, value);
+                let burst = &words[index..end];
+                if uniforms {
+                    for &value in burst {
+                        self.vertex_shader.upload_float_uniform(value);
                     }
-                    if program {
+                } else if program {
+                    let mirror = self.internal[REG_VS_COM_MODE] & 1 == 0;
+                    for &value in burst {
+                        self.vertex_shader.upload_program(value);
+                        if mirror {
+                            self.geometry_shader.upload_program(value);
+                        }
                         renderer.upload_shader_code(value);
                     }
+                } else if table {
+                    self.resources.light_tables.write(&mut self.internal, burst);
                 }
-                if end > index {
-                    self.internal[register] = words[end - 1];
+                if let Some(&last) = burst.last() {
+                    self.internal[register] = last;
                 }
                 index = end;
                 if !extra.is_multiple_of(2) {
@@ -1074,12 +1090,13 @@ impl Gpu {
                     log::warn!("command list jumps more than {jumps} times; stopping");
                     break;
                 }
-                words = read_command_buffer(memory, address, size);
+                read_command_buffer(memory, address, size, &mut words);
                 self.hash_words(&words);
                 index = 0;
             }
         }
 
+        self.list = words;
         self.flush_immediate(memory);
         self.command_lists += 1;
     }
@@ -1292,6 +1309,7 @@ impl Gpu {
         );
     }
 
+    #[inline(always)]
     fn write_internal<M: GpuMemory>(
         &mut self,
         memory: &mut M,
@@ -1331,7 +1349,13 @@ impl Gpu {
         let old = self.internal[register];
         let new = (old & !write_mask) | (value & write_mask);
         self.internal[register] = new;
+        if ACTS[register] {
+            self.act(memory, renderer, register, new);
+        }
+    }
 
+    #[inline(never)]
+    fn act<M: GpuMemory>(&mut self, memory: &mut M, renderer: &mut dyn Renderer, register: usize, new: u32) {
         match register {
             REG_DRAW_ARRAYS | REG_DRAW_ELEMENTS if self.skips() => {
                 self.draw_calls += 1;
@@ -1389,7 +1413,7 @@ impl Gpu {
             }
 
             lighting::REG_TABLE_DATA..=lighting::REG_TABLE_DATA_END => {
-                self.resources.light_tables.write(&mut self.internal, new);
+                self.resources.light_tables.write(&mut self.internal, &[new]);
             }
             proctex::REG_TABLE_DATA..=proctex::REG_TABLE_DATA_END => {
                 self.resources.proctex_tables.write(&mut self.internal, new);
@@ -1425,23 +1449,47 @@ impl Gpu {
 }
 
 /// reads a command buffer as words.
-fn read_command_buffer<M: GpuMemory>(memory: &mut M, paddr: u32, size: u32) -> Vec<u32> {
+fn read_command_buffer<M: GpuMemory>(memory: &mut M, paddr: u32, size: u32, words: &mut Vec<u32>) {
     let addr = memory.translate(paddr);
-    if let Some(bytes) = memory.slice(addr, size as usize) {
-        return bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+    words.clear();
+    words.resize(size as usize / 4, 0);
+    // SAFETY: the words' own bytes
+    let bytes = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * 4) };
+    match memory.slice(addr, bytes.len()) {
+        Some(found) => bytes.copy_from_slice(found),
+        None => memory.read(addr, bytes),
     }
-    let mut buffer = vec![0u8; size as usize];
-    memory.read(addr, &mut buffer);
-    buffer
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| u32::from_le_bytes(*c))
-        .collect()
+    for word in words.iter_mut() {
+        *word = u32::from_le(*word);
+    }
 }
 
 const REG_GS_BLOCK_END: usize = REG_GS_BLOCK + SHADER_BLOCK_SIZE - 1;
 const REG_VS_BLOCK_END: usize = REG_VS_BLOCK + SHADER_BLOCK_SIZE - 1;
+
+/// the registers a write does more to than store, as act matches them.
+const ACTS: [bool; INTERNAL_REGISTER_WORDS] = {
+    let mut acts = [false; INTERNAL_REGISTER_WORDS];
+    let ranges = [
+        (REG_DRAW_ARRAYS, REG_DRAW_ELEMENTS),
+        (REG_CMDBUF_JUMP0, REG_CMDBUF_JUMP1),
+        (REG_FIXED_ATTRIBUTE_INDEX, REG_FIXED_ATTRIBUTE_DATA_END),
+        (lighting::REG_TABLE_DATA, lighting::REG_TABLE_DATA_END),
+        (proctex::REG_TABLE_DATA, proctex::REG_TABLE_DATA_END),
+        (REG_GS_BLOCK, REG_GS_BLOCK_END),
+        (REG_VS_BLOCK, REG_VS_BLOCK_END),
+    ];
+    let mut at = 0;
+    while at < ranges.len() {
+        let mut register = ranges[at].0;
+        while register <= ranges[at].1 {
+            acts[register] = true;
+            register += 1;
+        }
+        at += 1;
+    }
+    acts
+};
 
 /// applies a write to one of a shader unit's configuration registers.
 fn configure_shader(unit: &mut shader::ShaderUnit, offset: usize, value: u32) {

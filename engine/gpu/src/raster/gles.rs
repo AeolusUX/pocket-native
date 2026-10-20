@@ -2877,6 +2877,8 @@ unsafe impl<T> Send for AssertSend<T> {}
 struct Worker {
     jobs: std::sync::mpsc::Sender<(bool, Job)>,
     thread: ThreadId,
+    /// draws waiting to go over together, one wakeup for many
+    held: std::sync::Mutex<Vec<Job>>,
 }
 
 impl Worker {
@@ -2925,7 +2927,7 @@ impl Worker {
             })
             .map_err(|error| error.to_string())?;
         let (gl, compiler) = made.recv().map_err(|_| "the GL thread stopped".to_owned())??;
-        Ok((Worker { jobs, thread: handle.thread().id() }, gl, compiler))
+        Ok((Worker { jobs, thread: handle.thread().id(), held: Default::default() }, gl, compiler))
     }
 
     fn here(&self) -> bool {
@@ -2937,6 +2939,7 @@ impl Worker {
             flush_clears(None);
             job();
         } else {
+            self.flush();
             self.jobs.send((false, Box::new(job))).expect("the GL thread stopped");
         }
     }
@@ -2946,8 +2949,35 @@ impl Worker {
         if self.here() {
             job();
         } else {
+            self.flush();
             self.jobs.send((true, Box::new(job))).expect("the GL thread stopped");
         }
+    }
+
+    /// a draw, held to go with the next few.
+    fn post_draw(&self, job: impl FnOnce() + Send + 'static) {
+        if self.here() {
+            job();
+            return;
+        }
+        let mut held = self.held.lock().unwrap();
+        held.push(Box::new(job));
+        if held.len() >= 16 {
+            let draws = std::mem::take(&mut *held);
+            drop(held);
+            self.send_draws(draws);
+        }
+    }
+
+    fn flush(&self) {
+        let draws = std::mem::take(&mut *self.held.lock().unwrap());
+        if !draws.is_empty() {
+            self.send_draws(draws);
+        }
+    }
+
+    fn send_draws(&self, draws: Vec<Job>) {
+        self.jobs.send((true, Box::new(move || draws.into_iter().for_each(|draw| draw())))).expect("the GL thread stopped");
     }
 
     fn run<R>(&self, job: impl FnOnce() -> R) -> R {
@@ -2965,6 +2995,7 @@ impl Worker {
         // borrows outlives it, and nothing else touches that meanwhile
         let wrapped: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + '_>, Box<dyn FnOnce() + Send + 'static>>(wrapped) };
         let _timed = timed(20);
+        self.flush();
         self.jobs.send((false, wrapped)).expect("the GL thread stopped");
         result.recv().expect("the GL thread stopped").0
     }
@@ -4854,12 +4885,17 @@ impl Gles {
             sources,
         };
         let gl = self.gl;
-        self.worker.post_keeping(move || {
+        self.worker.post_draw(move || {
             if let Err(error) = job.submit(gl) {
                 log::error!("the GPU could not draw, {error}");
             }
         });
         Ok(())
+    }
+
+    /// sends the draws held back.
+    pub fn flush_draws(&self) {
+        self.worker.flush();
     }
 
     fn vertex_stage(&mut self, shading: &Shading) -> Result<u64, String> {
