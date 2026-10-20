@@ -1057,7 +1057,7 @@ impl System {
             }
             gpu.presented = state;
             gpu.shown += 1;
-            let frames = frame.saturating_sub(std::mem::replace(&mut gpu.presented_frame, frame)).min(4) as u32;
+            let frames = frame.saturating_sub(std::mem::replace(&mut gpu.presented_frame, frame)).min(2) as u32;
             let mut shown = [None, None];
             for (index, screen) in [zakuro_common::Screen::Top, zakuro_common::Screen::Bottom].into_iter().enumerate() {
                 let Some(area) = areas[index] else { continue };

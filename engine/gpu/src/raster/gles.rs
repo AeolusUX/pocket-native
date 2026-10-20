@@ -1198,8 +1198,9 @@ impl Kms {
 
     /// queues what the context just swapped to for the panel's next
     /// vertical blank, waiting only for a flip still queued from before.
-    /// a picture goes up as many refreshes after the last as the game's
-    /// frames between them, so motion stays even when frames are skipped.
+    /// a picture goes up no sooner than as many refreshes after the last as
+    /// the game's frames between them, two at most, so none flashes by for
+    /// one refresh and a game behind is never held up further.
     fn flip(&mut self, frames: u32) -> Result<(), String> {
         self.settle()?;
         let period = PANEL_PERIOD.load(std::sync::atomic::Ordering::Relaxed) / 1000;
