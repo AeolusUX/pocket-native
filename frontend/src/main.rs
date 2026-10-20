@@ -113,6 +113,8 @@ fn main() {
         hardware_renderer: true,
         software_draws: !advanced.gpu_drawing,
         data_dir: Some(data.clone()),
+        language: game.language,
+        region: game.region,
         // ZAKURO_CLOCK=milliseconds since 1900 starts the clock there, as boot
         // takes it, so that a scripted run meets the same encounters
         clock: std::env::var("ZAKURO_CLOCK").ok().and_then(|v| v.parse().ok()),

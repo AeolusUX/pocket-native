@@ -161,7 +161,7 @@ frames, and it is off by default.
 
 **Advanced settings** are saved per game. They switch the engine's speed
 hacks and graphics, CPU and loading options for a game that doesn't run or
-look right. **Most compatible** turns off every speed hack a game could
+look right, and set the console language and region the game is told. **Most compatible** turns off every speed hack a game could
 trip over in one go; if that fixes it, turn them back on one at a time to
 find the culprit. Settings under a "requires restart" heading take effect
 after **Restart game**, and **Reset to defaults** goes back to what the

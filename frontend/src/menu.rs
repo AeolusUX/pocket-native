@@ -42,6 +42,8 @@ enum Field {
     Quit,
     Toggle(usize),
     FrameSkip,
+    Language,
+    Region,
     Restart,
     Compatible,
     Defaults,
@@ -121,6 +123,9 @@ const LAYOUTS: [(Layout, bool, &str); 6] = [
     (Layout::Original, false, "Original size"),
 ];
 const CAPS: [u32; 3] = [20, 30, 60];
+/// the languages and regions in cfg's order.
+const LANGUAGES: [&str; 12] = ["Japanese", "English", "French", "German", "Italian", "Spanish", "Chinese (simplified)", "Korean", "Dutch", "Portuguese", "Russian", "Chinese (traditional)"];
+const REGIONS: [&str; 7] = ["Japan", "USA", "Europe", "Australia", "China", "Korea", "Taiwan"];
 
 #[derive(Default)]
 pub struct Menu {
@@ -149,6 +154,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Graphics - requires restart", toggles(12..=22)),
             ("CPU - requires restart", toggles(23..=24)),
             ("Loading - requires restart", toggles(25..=27)),
+            ("System - requires restart", vec![Field::Language, Field::Region]),
             ("", vec![Field::Restart, Field::Compatible, Field::Defaults, Field::Back]),
         ],
     }
@@ -198,6 +204,8 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
             let skip = Advanced::of(game, profile).frame_skip;
             ("Frame skip", if skip == 0 { "Off".into() } else { format!("Up to {skip}") })
         }
+        Field::Language => ("Language", LANGUAGES.get(game.language as usize).copied().unwrap_or("?").into()),
+        Field::Region => ("Region", REGIONS.get(game.region as usize).copied().unwrap_or("?").into()),
         Field::Restart => ("Restart game", String::new()),
         Field::Compatible => ("Most compatible", String::new()),
         Field::Defaults => ("Reset to defaults", String::new()),
@@ -241,6 +249,8 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
             advanced.frame_skip = step(&[0, 1, 2, 3], advanced.frame_skip, by);
             game.advanced = Some(advanced);
         }
+        Field::Language => game.language = (game.language as isize + by).rem_euclid(LANGUAGES.len() as isize) as u8,
+        Field::Region => game.region = (game.region as isize + by).rem_euclid(REGIONS.len() as isize) as u8,
         Field::Compatible => game.advanced = Some(Advanced::compatible(Advanced::of(game, profile))),
         Field::Defaults => game.advanced = None,
         Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Back => {}
@@ -269,6 +279,8 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::Quit => "Back to EmulationStation.",
         Field::Toggle(index) => TOGGLES[index].3,
         Field::FrameSkip => "The most pictures left out in a row while the game is behind. Off is smoother and slower.",
+        Field::Language => "The console language the game is told. Games without it pick one of their own.",
+        Field::Region => "The console region the game is told. A game from another region may want its own.",
         Field::Restart => "Starts the game again, for the settings that require a restart.",
         Field::Compatible => "Turns off every speed hack a game could trip over, then restart. If that helps, turn them back on one at a time.",
         Field::Defaults => "Back to what this game starts with.",

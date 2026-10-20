@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use zakuro_core::services::cfg::{LANGUAGE_ENGLISH, REGION_USA};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Layout {
@@ -87,11 +88,21 @@ impl Default for Settings {
 
 /// a game's options by name, on or off, and its advanced settings when the
 /// player changed them.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GameSettings {
+    /// the console's language and region the game is told, as cfg numbers
+    /// them.
+    pub language: u8,
+    pub region: u8,
     pub options: BTreeMap<String, bool>,
     pub advanced: Option<Advanced>,
+}
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        GameSettings { language: LANGUAGE_ENGLISH, region: REGION_USA, options: BTreeMap::new(), advanced: None }
+    }
 }
 
 /// the engine's speed hacks, each of which a game may not get along with. all
