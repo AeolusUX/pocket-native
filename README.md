@@ -138,6 +138,8 @@ Saves, the game's own settings and its log go in
 | Tap L2, or FN + L1 | Swaps the screens |
 | FN + R1 | Switches between both screens and one big screen |
 
+On a handheld with no FN, L3 does what FN does in these.
+
 ## The menu
 
 - **Display:** screen layout, smooth scaling, frame interpolation, fps and
