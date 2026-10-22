@@ -115,12 +115,13 @@ pub enum Action {
 }
 
 /// the layouts the menu goes through, with the screens swapped or not.
-const LAYOUTS: [(Layout, bool, &str); 6] = [
+const LAYOUTS: [(Layout, bool, &str); 7] = [
     (Layout::BigTop, false, "Big top"),
     (Layout::BigTop, true, "Swapped"),
     (Layout::TopOnly, false, "Top only"),
     (Layout::TopOnly, true, "Bottom only"),
     (Layout::SideBySide, false, "Side by side"),
+    (Layout::BigBeside, false, "Big top, small beside"),
     (Layout::Original, false, "Original size"),
 ];
 const CAPS: [u32; 3] = [20, 30, 60];

@@ -14,6 +14,7 @@ pub enum Layout {
     TopOnly,
     SideBySide,
     Original,
+    BigBeside,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
