@@ -42,6 +42,14 @@ pub enum Stick {
     Dpad,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Rotation {
+    Auto,
+    Clockwise,
+    CounterClockwise,
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -55,6 +63,9 @@ pub struct Settings {
     pub show_fps: bool,
     /// the battery and the time under the screens.
     pub show_clock: bool,
+    /// the picture turned onto a sideways panel, as ZAKURO_PANEL_ROTATE
+    /// does, which Auto leaves to.
+    pub rotation: Rotation,
     pub frame_cap: u32,
     pub power: Power,
     pub touch_speed: Speed,
@@ -75,6 +86,7 @@ impl Default for Settings {
             interpolate_to: 0,
             show_fps: false,
             show_clock: true,
+            rotation: Rotation::Auto,
             frame_cap: 30,
             power: Power::Performance,
             touch_speed: Speed::Normal,

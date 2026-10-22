@@ -142,7 +142,8 @@ Saves, the game's own settings and its log go in
 
 - **Display:** screen layout, smooth scaling, frame interpolation, fps and
   temperature in the bottom right corner, battery and a 12-hour clock in
-  the bottom left
+  the bottom left, and rotation for a screen that shows the picture the
+  wrong way round
 - **Performance:** frame cap (20, 30 or 60) and power (saver, balanced,
   performance)
 - **This game:** options from the game's profile

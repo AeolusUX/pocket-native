@@ -38,7 +38,7 @@ use crate::font::{Canvas, Font};
 use crate::input::{Pad, FN, L1, L2, L3, R1, R2, R3, START};
 use crate::menu::{Action, Menu, Status};
 use crate::profile::Profile;
-use crate::settings::{Advanced, GameSettings, Layout, Power, Settings};
+use crate::settings::{Advanced, GameSettings, Layout, Power, Rotation, Settings};
 
 /// the exit code that asks the launcher to start the game again.
 const RESET: i32 = 3;
@@ -108,6 +108,18 @@ fn main() {
     let profile = profile::find(&profile::titles_dir(), title_id_of(&path)).unwrap_or_default();
     let advanced = Advanced::of(&game, &profile);
     advanced.export();
+    let settings_path = settings::config_dir().join("settings.toml");
+    let mut settings: Settings = settings::load(&settings_path);
+    // the menu's rotation over ZAKURO_PANEL_ROTATE, before the panel starts
+    let rotate = match settings.rotation {
+        Rotation::Auto => None,
+        Rotation::Clockwise => Some("90"),
+        Rotation::CounterClockwise => Some("270"),
+        Rotation::Off => Some("0"),
+    };
+    if let Some(rotate) = rotate {
+        std::env::set_var("ZAKURO_PANEL_ROTATE", rotate);
+    }
     let config = Config {
         recompiled: std::env::var("ZAKURO_RECOMPILED").ok().filter(|_| advanced.recompiled).map(Into::into),
         hardware_renderer: true,
@@ -131,8 +143,6 @@ fn main() {
     let title_id = system.title.as_ref().map_or(0, |title| title.program_id());
     let title = if profile.name.is_empty() { format!("{title_id:016X}") } else { profile.name.clone() };
     log::info!("Pocket Native {}, {title}, {} options", env!("CARGO_PKG_VERSION"), profile.options.len());
-    let settings_path = settings::config_dir().join("settings.toml");
-    let mut settings: Settings = settings::load(&settings_path);
     let base_drops = std::env::var("ZAKURO_DROP_DRAWS").unwrap_or_default();
     apply_options(&mut system, &game, &profile, &base_drops);
     let mut probe = probing.then(|| probe::Probe::new(title_id, args.get(1).and_then(|frames| frames.parse().ok()).unwrap_or(3600)));

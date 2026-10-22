@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::font::{rgba, Canvas};
 use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Buttons, GameSettings, Layout, Power, Settings, Speed, Stick};
+use crate::settings::{Advanced, Buttons, GameSettings, Layout, Power, Rotation, Settings, Speed, Stick};
 
 const PANEL: [u8; 3] = [13, 20, 32];
 const EDGE: [u8; 3] = [40, 110, 210];
@@ -28,6 +28,7 @@ enum Field {
     Interpolate,
     ShowFps,
     ShowClock,
+    Rotation,
     FrameCap,
     Power,
     Option(usize),
@@ -142,7 +143,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
     let toggles = |range: std::ops::RangeInclusive<usize>| range.map(Field::Toggle).collect();
     match page {
         Page::Main => vec![
-            ("Display", vec![Field::Layout, Field::Smooth, Field::Interpolate, Field::ShowFps, Field::ShowClock]),
+            ("Display", vec![Field::Layout, Field::Smooth, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::Rotation]),
             ("Performance", vec![Field::FrameCap, Field::Power]),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
             ("Controls", vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::ReverseTiltX, Field::ReverseTiltY]),
@@ -179,6 +180,15 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
         Field::Interpolate => ("Frame interpolation", if settings.interpolate_to == 0 { "Off".into() } else { format!("Up to {} fps", settings.interpolate_to) }),
         Field::ShowFps => ("Show fps", if settings.show_fps { "On" } else { "Off" }.into()),
         Field::ShowClock => ("Clock and battery", if settings.show_clock { "On" } else { "Off" }.into()),
+        Field::Rotation => {
+            let rotation = match settings.rotation {
+                Rotation::Auto => "Auto",
+                Rotation::Clockwise => "Clockwise",
+                Rotation::CounterClockwise => "Counter clockwise",
+                Rotation::Off => "Off",
+            };
+            ("Rotation", rotation.into())
+        }
         Field::FrameCap => ("Frame cap", format!("{} fps", settings.frame_cap)),
         Field::Power => ("Power", format!("{:?}", settings.power)),
         Field::Option(index) => {
@@ -226,6 +236,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::Interpolate => settings.interpolate_to = step(&[0, 30, 60], settings.interpolate_to, by),
         Field::ShowFps => settings.show_fps = !settings.show_fps,
         Field::ShowClock => settings.show_clock = !settings.show_clock,
+        Field::Rotation => settings.rotation = step(&[Rotation::Auto, Rotation::Clockwise, Rotation::CounterClockwise, Rotation::Off], settings.rotation, by),
         Field::FrameCap => settings.frame_cap = step(&CAPS, settings.frame_cap, by),
         Field::Power => settings.power = step(&[Power::Saver, Power::Balanced, Power::Performance], settings.power, by),
         Field::Option(index) => {
@@ -265,6 +276,7 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::Interpolate => "Fills in pictures halfway between a game's, up to 30 or 60 a second. 30 costs half as much GPU time.",
         Field::ShowFps => "Pictures a second and the temperature, in the bottom right corner.",
         Field::ShowClock => "The battery and a 12-hour clock, in the bottom left corner.",
+        Field::Rotation => "Turns the picture for a screen that shows it the wrong way round. Takes effect when the game starts again.",
         Field::FrameCap => "The most pictures shown a second. Lower lasts longer and runs cooler.",
         Field::Power => "How fast the CPU and GPU run. Performance is fastest and warmest, Saver lasts longest.",
         Field::Option(index) => &profile.options[index].help,
