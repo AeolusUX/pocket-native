@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use zakuro_core::services::hid::PadState;
 
-use crate::settings::{Buttons, Settings, Speed, Stick};
+use crate::settings::{Buttons, Dpad, Settings, Speed, Stick};
 
 pub const A: u16 = 305;
 pub const B: u16 = 304;
@@ -293,11 +293,14 @@ pub fn controls(keys: &HashSet<u16>, axes: &[i32; 8], settings: &Settings) -> (P
             (Buttons::Xbox, Y) => X,
             _ => key,
         };
-        if keys.contains(&key) {
+        if keys.contains(&key) && (settings.dpad == Dpad::Dpad || ![UP, DOWN, LEFT, RIGHT].contains(&key)) {
             buttons |= button;
         }
     }
-    let (x, y) = (stick(axes[0]), -stick(axes[1]));
+    let (x, y) = match dpad(keys) {
+        (across, down) if settings.dpad == Dpad::CirclePad && (across, down) != (0.0, 0.0) => (across, -down),
+        _ => (stick(axes[0]), -stick(axes[1])),
+    };
     match settings.left_stick {
         Stick::CirclePad => (buttons, x, y),
         Stick::Dpad => {
@@ -309,6 +312,12 @@ pub fn controls(keys: &HashSet<u16>, axes: &[i32; 8], settings: &Settings) -> (P
             (buttons, 0.0, 0.0)
         }
     }
+}
+
+/// the d-pad held as a stick's position, across and down.
+pub fn dpad(keys: &HashSet<u16>) -> (f32, f32) {
+    let axis = |less: u16, more: u16| keys.contains(&more) as i32 as f32 - keys.contains(&less) as i32 as f32;
+    (axis(LEFT, RIGHT), axis(UP, DOWN))
 }
 
 /// how far the touch cursor goes a frame with the right stick held over.

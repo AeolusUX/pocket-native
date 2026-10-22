@@ -44,6 +44,13 @@ pub enum Stick {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Dpad {
+    Dpad,
+    CirclePad,
+    Touch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rotation {
     Auto,
     Clockwise,
@@ -72,6 +79,9 @@ pub struct Settings {
     pub touch_speed: Speed,
     pub buttons: Buttons,
     pub left_stick: Stick,
+    /// the d-pad as the circle pad or the touch cursor, for handhelds short
+    /// of sticks.
+    pub dpad: Dpad,
     /// tilting with L2 and the right stick the other way, left and right
     /// or up and down.
     pub reverse_tilt_x: bool,
@@ -93,6 +103,7 @@ impl Default for Settings {
             touch_speed: Speed::Normal,
             buttons: Buttons::Nintendo,
             left_stick: Stick::CirclePad,
+            dpad: Dpad::Dpad,
             reverse_tilt_x: false,
             reverse_tilt_y: false,
         }

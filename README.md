@@ -137,6 +137,7 @@ Saves, the game's own settings and its log go in
 | FN + Start | Quits |
 | Tap L2, or FN + L1 | Swaps the screens |
 | FN + R1 | Switches between both screens and one big screen |
+| FN + Select | Switches the D-pad between D-pad, circle pad and touch cursor, for handhelds short of sticks |
 
 On a handheld with no FN, L3 does what FN does in these.
 
@@ -150,7 +151,8 @@ On a handheld with no FN, L3 does what FN does in these.
   performance)
 - **This game:** options from the game's profile
 - **Controls:** touch cursor speed, Nintendo or Xbox button layout, left
-  stick as circle pad or D-pad, tilt reversed left and right or up and down
+  stick as circle pad or D-pad, D-pad as itself, circle pad or touch
+  cursor, tilt reversed left and right or up and down
 - **Game:** resume, advanced settings, reset, quit
 
 The selected setting's help shows at the bottom of the menu.

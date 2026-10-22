@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::font::{rgba, Canvas};
 use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Buttons, GameSettings, Layout, Power, Rotation, Settings, Speed, Stick};
+use crate::settings::{Advanced, Buttons, Dpad, GameSettings, Layout, Power, Rotation, Settings, Speed, Stick};
 
 const PANEL: [u8; 3] = [13, 20, 32];
 const EDGE: [u8; 3] = [40, 110, 210];
@@ -35,6 +35,7 @@ enum Field {
     TouchSpeed,
     Buttons,
     LeftStick,
+    Dpad,
     ReverseTiltX,
     ReverseTiltY,
     Resume,
@@ -147,7 +148,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Display", vec![Field::Layout, Field::Smooth, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::Rotation]),
             ("Performance", vec![Field::FrameCap, Field::Power]),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
-            ("Controls", vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::ReverseTiltX, Field::ReverseTiltY]),
+            ("Controls", vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::Dpad, Field::ReverseTiltX, Field::ReverseTiltY]),
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
         ],
         Page::Advanced => vec![
@@ -200,6 +201,14 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
         Field::TouchSpeed => ("Touch cursor speed", format!("{:?}", settings.touch_speed)),
         Field::Buttons => ("A/B layout", format!("{:?}", settings.buttons)),
         Field::LeftStick => ("Left stick", if settings.left_stick == Stick::CirclePad { "Circle pad" } else { "D-pad" }.into()),
+        Field::Dpad => {
+            let dpad = match settings.dpad {
+                Dpad::Dpad => "D-pad",
+                Dpad::CirclePad => "Circle pad",
+                Dpad::Touch => "Touch cursor",
+            };
+            ("D-pad", dpad.into())
+        }
         Field::ReverseTiltX => ("Reverse tilt X", if settings.reverse_tilt_x { "On" } else { "Off" }.into()),
         Field::ReverseTiltY => ("Reverse tilt Y", if settings.reverse_tilt_y { "On" } else { "Off" }.into()),
         Field::Resume => ("Resume", String::new()),
@@ -248,6 +257,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::TouchSpeed => settings.touch_speed = step(&[Speed::Slow, Speed::Normal, Speed::Fast], settings.touch_speed, by),
         Field::Buttons => settings.buttons = step(&[Buttons::Nintendo, Buttons::Xbox], settings.buttons, by),
         Field::LeftStick => settings.left_stick = step(&[Stick::CirclePad, Stick::Dpad], settings.left_stick, by),
+        Field::Dpad => settings.dpad = step(&[Dpad::Dpad, Dpad::CirclePad, Dpad::Touch], settings.dpad, by),
         Field::ReverseTiltX => settings.reverse_tilt_x = !settings.reverse_tilt_x,
         Field::ReverseTiltY => settings.reverse_tilt_y = !settings.reverse_tilt_y,
         Field::Toggle(index) => {
@@ -284,6 +294,7 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::TouchSpeed => "How fast the right stick moves the touch cursor. R2 or R3 touches.",
         Field::Buttons => "Which face buttons are A and B: where Nintendo puts them, or where Xbox does.",
         Field::LeftStick => "The left stick as the circle pad, or as the d-pad.",
+        Field::Dpad => "The d-pad as itself, the circle pad or the touch cursor. FN or L3 with Select switches it in game.",
         Field::ReverseTiltX => "Holding L2, the right stick tilts the console. On tilts it the other way left and right.",
         Field::ReverseTiltY => "Holding L2, the right stick tilts the console. On tilts it the other way up and down.",
         Field::Resume => "Back to the game. B or FN does the same.",
@@ -502,11 +513,13 @@ pub struct Status {
     fps: Option<String>,
     battery: Option<i64>,
     clock: Option<String>,
+    /// what a hotkey just did, at the top.
+    pub note: Option<&'static str>,
 }
 
 impl Status {
     /// none when the settings show nothing.
-    pub fn now(settings: &Settings, fps: u32) -> Option<Status> {
+    pub fn now(settings: &Settings, fps: u32, note: Option<&'static str>) -> Option<Status> {
         let read = |path: &str| std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse::<i64>().ok());
         let status = Status {
             fps: settings.show_fps.then(|| match read("/sys/class/thermal/thermal_zone0/temp") {
@@ -515,14 +528,20 @@ impl Status {
             }),
             battery: settings.show_clock.then(|| read("/sys/class/power_supply/battery/capacity")).flatten(),
             clock: settings.show_clock.then(clock),
+            note,
         };
-        (status.fps.is_some() || status.clock.is_some()).then_some(status)
+        (status.fps.is_some() || status.clock.is_some() || note.is_some()).then_some(status)
     }
 
     pub fn draw(&self, canvas: &mut Canvas, (width, height): (u32, u32)) {
         let (width, height) = (width as f32, height as f32);
         let (top, bottom) = (height - 32.0, height - 8.0);
         let backing = rgba([0, 0, 0], 160);
+        if let Some(note) = self.note {
+            let half = canvas.measure(BIG, note) / 2.0 + 6.0;
+            canvas.fill([width / 2.0 - half, 8.0, width / 2.0 + half, 32.0], backing);
+            canvas.text(BIG, note, width / 2.0 - half + 6.0, 11.0, rgba(TEXT, 255), false);
+        }
         if let Some(line) = &self.fps {
             canvas.fill([width - 20.0 - canvas.measure(BIG, line), top, width - 8.0, bottom], backing);
             canvas.text(BIG, line, width - 14.0, top + 3.0, rgba(TEXT, 255), true);
