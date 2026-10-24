@@ -1327,8 +1327,21 @@ impl Kms {
 
     /// queues what the context just swapped to for the panel's next
     /// vertical blank, waiting only for a flip still queued from before.
-    fn flip(&mut self) -> Result<(), String> {
+    /// a picture goes up no sooner than as many refreshes after the last as
+    /// the game's frames between them, two at most, so none flashes by for
+    /// one refresh and a game behind is never held up further.
+    fn flip(&mut self, frames: u32) -> Result<(), String> {
         self.settle()?;
+        let period = PANEL_PERIOD.load(std::sync::atomic::Ordering::Relaxed) / 1000;
+        let mut paced = false;
+        if frames > 1 && period > 0 && self.last_flip != 0 {
+            let due = FLIPPED_TIME.load(std::sync::atomic::Ordering::Relaxed) + (frames as u64 - 1) * period + 1000;
+            let now = monotonic_micros();
+            if due > now && due - now < 4 * period {
+                std::thread::sleep(std::time::Duration::from_micros(due - now));
+                paced = true;
+            }
+        }
         // SAFETY: as in open, the buffer object is the surface's front one
         unsafe {
             let bo = call!(self.gbm, "gbm_surface_lock_front_buffer", fn(*mut c_void) -> *mut c_void, self.surface);
@@ -1378,7 +1391,8 @@ impl Kms {
                 self.set = true;
                 self.shown = Some((bo, fb));
             } else if call!(self.drm, "drmModePageFlip", fn(i32, u32, u32, u32, *mut c_void) -> i32, self.fd, self.crtc, fb, 1, std::ptr::null_mut()) == 0 {
-                self.asked = monotonic_micros();
+                // a held picture says nothing of how early pictures come
+                self.asked = if paced { 0 } else { monotonic_micros() };
                 self.pending = Some((bo, fb));
             } else {
                 call!(self.drm, "drmModeRmFB", fn(i32, u32) -> i32, self.fd, fb);
@@ -1889,7 +1903,7 @@ unsafe fn draw_parts(
     Ok(())
 }
 
-fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
+fn show(gl: GlRef, parts: Vec<Part>, frames: u32) -> Result<(), String> {
     disturb();
     PANEL.with(|panel| {
         let mut panel = panel.borrow_mut();
@@ -2052,7 +2066,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
             }
         }
         match &mut panel.output {
-            Output::Kms(kms) => kms.flip(),
+            Output::Kms(kms) => kms.flip(frames),
             Output::Fbdev(_) | Output::Window(_) | Output::Offscreen(_) => Ok(()),
         }
     })
@@ -4834,7 +4848,7 @@ impl Gles {
         link(&self.gl, vertex, fragment)
     }
 
-    pub(crate) fn present(&mut self, shown: [Option<(crate::PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlays: Vec<Arc<crate::Overlay>>, smooth: bool, interpolate: bool) {
+    pub(crate) fn present(&mut self, shown: [Option<(crate::PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlays: Vec<Arc<crate::Overlay>>, smooth: bool, interpolate: bool, frames: u32) {
         let mut parts = Vec::new();
         for (index, item) in shown.into_iter().enumerate() {
             let Some((image, area)) = item else { continue };
@@ -4871,7 +4885,7 @@ impl Gles {
         let gl = self.gl;
         self.worker.post(move || {
             sim_present(&gl);
-            if let Err(error) = show(gl, parts) {
+            if let Err(error) = show(gl, parts, frames) {
                 log::error!("could not show the screens, {error}");
             }
             presenting.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);

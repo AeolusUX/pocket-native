@@ -252,6 +252,8 @@ pub struct Gpu {
     /// the screen transfer count and the buffers shown when the panel last
     /// showed the screens.
     pub presented: Option<(u64, u32, u32)>,
+    /// the frame the last picture went up at.
+    pub presented_frame: u64,
     /// the last present showed something new, which an interpolated
     /// picture shows once more.
     pub presented_new: bool,
@@ -378,6 +380,7 @@ impl Gpu {
             transfers: 0,
             pictures: 0,
             presented: None,
+            presented_frame: 0,
             presented_new: false,
             shown: 0,
             vertices_drawn: 0,
@@ -924,13 +927,13 @@ impl Gpu {
     /// area, left, top, width and height in the panel's pixels, the overlays
     /// over them, the top screen filtered when smooth and a picture halfway
     /// between its last two shown first when interpolating.
-    pub fn present_panel(&mut self, shown: [Option<(PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlays: Vec<std::sync::Arc<Overlay>>, smooth: bool, interpolate: bool) {
+    pub fn present_panel(&mut self, shown: [Option<(PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlays: Vec<std::sync::Arc<Overlay>>, smooth: bool, interpolate: bool, frames: u32) {
         #[cfg(feature = "gles")]
         if let Some(hardware) = self.resources.hardware.as_mut().or(self.panel.as_mut()) {
-            hardware.present(shown, cursor, overlays, smooth, interpolate);
+            hardware.present(shown, cursor, overlays, smooth, interpolate, frames);
         }
         #[cfg(not(feature = "gles"))]
-        let _ = (shown, cursor, overlays, smooth, interpolate);
+        let _ = (shown, cursor, overlays, smooth, interpolate, frames);
     }
 
     /// how many times the console's resolution the host's GPU draws at, 1
