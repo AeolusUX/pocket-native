@@ -1,0 +1,23 @@
+name = "Pokémon Ultra Moon"
+
+# the black outlines outdoors, two passes over the screen and a copy of the
+# depth buffer, a quarter of the GPU's work there
+[[option]]
+name = "Outlines"
+help = "The black outlines outdoors. Off saves a quarter of the GPU's work there."
+default = true
+drops_when_off = ["@depth:8744197d"]
+
+# a faint shading over the Pokémon in battle, a third of the GPU's work there
+[[option]]
+name = "Battle shading"
+help = "A faint shading over the Pokémon in battle, a third of the GPU's work there."
+default = false
+drops_when_off = ["@depth:3f2b3879e26adb3d"]
+
+[[option]]
+name = "Bottom screen in battle"
+help = "How often the battle menu is drawn. 15 fps leaves more time for the battle."
+values = ["15 fps", "30 fps"]
+default = false
+bottom_full_rate_when_on = true
