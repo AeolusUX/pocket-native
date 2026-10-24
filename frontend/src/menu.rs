@@ -526,7 +526,7 @@ impl Status {
                 Some(milli) => format!("{fps} fps · {}°C", milli / 1000),
                 None => format!("{fps} fps"),
             }),
-            battery: settings.show_clock.then(|| read("/sys/class/power_supply/battery/capacity")).flatten(),
+            battery: settings.show_clock.then(battery).flatten(),
             clock: settings.show_clock.then(clock),
             note,
         };
@@ -567,6 +567,21 @@ impl Status {
         }
         canvas.text(BIG, &text, x, top + 3.0, rgba(TEXT, 255), false);
     }
+}
+
+/// the battery's percentage: from sysfs, or, where that file is not there
+/// (Knulli names its supply another way), from knulli-battery-check, whose
+/// report has a "Capacity: 83%" line.
+fn battery() -> Option<i64> {
+    // any failure here, a missing file, an unreadable one or one that is not
+    // a number, goes on to the script
+    if let Some(percent) = std::fs::read_to_string("/sys/class/power_supply/battery/capacity").ok().and_then(|text| text.trim().parse().ok()) {
+        return Some(percent);
+    }
+    let output = std::process::Command::new("knulli-battery-check").arg("report").output().ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Capacity:")?.trim().trim_end_matches('%').parse().ok())
 }
 
 fn clock() -> String {
