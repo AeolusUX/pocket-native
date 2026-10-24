@@ -18,6 +18,15 @@ trait Device {
     fn target(&self) -> f64 {
         0.1
     }
+    /// times the device ran dry so far, where it counts them.
+    fn underruns(&self) -> i32 {
+        0
+    }
+    /// past how far behind, in seconds, the oldest sound is left out, and
+    /// down to how far.
+    fn catch_up(&self) -> (f64, f64) {
+        (self.target() * 4.0, self.target())
+    }
 }
 
 pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
@@ -26,7 +35,7 @@ pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
             for _ in samples {}
             return;
         };
-        let mut pacer = Pacer::new(device.target());
+        let mut pacer = Pacer::new(device.target(), device.catch_up());
         let mut since_log = std::time::Instant::now();
         while let Ok(first) = samples.recv() {
             // everything waiting, taken at once, so that how far the sound is
@@ -38,10 +47,11 @@ pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
             let behind = pacer.take(device.as_mut(), &input);
             if since_log.elapsed() >= std::time::Duration::from_secs(30) {
                 log::info!(
-                    "sound {:.0} ms behind, stretched {:.2} times, {} ms left out to catch up",
+                    "sound {:.0} ms behind, stretched {:.2} times, {} ms left out to catch up, {} underruns so far",
                     behind / AUDIO_SAMPLE_RATE * 1000.0,
                     pacer.ratio,
-                    (std::mem::take(&mut pacer.dropped) as f64 / AUDIO_SAMPLE_RATE * 1000.0) as u64
+                    (std::mem::take(&mut pacer.dropped) as f64 / AUDIO_SAMPLE_RATE * 1000.0) as u64,
+                    device.underruns()
                 );
                 since_log = std::time::Instant::now();
             }
@@ -50,11 +60,14 @@ pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
 }
 
 /// keeps the sound target seconds behind: stretches it longer while less is
-/// queued and shorter while more is, and past four times the target leaves
-/// the oldest out.
+/// queued and shorter while more is, and far behind leaves the oldest out.
 struct Pacer {
     stretch: Stretch,
     target: f64,
+    /// past how many frames behind the oldest is left out, and down to how
+    /// many.
+    over: f64,
+    to: f64,
     ratio: f64,
     chunk: Vec<[i16; 2]>,
     /// frames left out since the last look.
@@ -62,8 +75,9 @@ struct Pacer {
 }
 
 impl Pacer {
-    fn new(target_seconds: f64) -> Pacer {
-        Pacer { stretch: Stretch::default(), target: AUDIO_SAMPLE_RATE * target_seconds, ratio: 1.0, chunk: Vec::new(), dropped: 0 }
+    fn new(target_seconds: f64, (over, to): (f64, f64)) -> Pacer {
+        let frames = |seconds: f64| AUDIO_SAMPLE_RATE * seconds;
+        Pacer { stretch: Stretch::default(), target: frames(target_seconds), over: frames(over), to: frames(to), ratio: 1.0, chunk: Vec::new(), dropped: 0 }
     }
 
     /// takes the title's newest sound to the device, and says how many of
@@ -75,8 +89,8 @@ impl Pacer {
         // far behind, after a stall or with a device that holds less than it
         // should, the oldest is left out to catch up at once rather than be
         // stretched away over minutes
-        if behind > self.target * 4.0 {
-            self.dropped += self.stretch.skip((behind - self.target) as usize);
+        if behind > self.over {
+            self.dropped += self.stretch.skip((behind - self.to) as usize);
         }
         let wanted = (1.0 + (self.target - behind) / self.target).clamp(0.75, 2.5);
         self.ratio += (wanted - self.ratio) * 0.1;
@@ -147,6 +161,12 @@ impl Device for Alsa {
         0.15
     }
 
+    /// past a second behind, and down to a second, as the RG52 Mini's lag
+    /// was fixed with
+    fn catch_up(&self) -> (f64, f64) {
+        (1.0, 1.0)
+    }
+
     fn queued(&mut self) -> i64 {
         let mut queued = 0i64;
         // SAFETY: the device open made, and a number for ALSA to fill
@@ -173,9 +193,10 @@ impl Device for Alsa {
     }
 }
 
-/// how much sound AAudio keeps queued, in seconds.
+/// how much sound AAudio keeps queued, in seconds: a phone's scheduler
+/// holds a thread up longer than a handheld's, and less ran the device dry.
 #[cfg(target_os = "android")]
-const AAUDIO_TARGET: f64 = 0.05;
+const AAUDIO_TARGET: f64 = 0.1;
 
 /// the sound through AAudio at the device's own rate, which the title's is
 /// resampled to here: a stream at the title's rate would have the system
@@ -201,7 +222,9 @@ impl AAudio {
                 .format(AudioFormat::PCM_I16)
                 .channel_count(2)
                 .sharing_mode(AudioSharingMode::Shared)
-                .performance_mode(AudioPerformanceMode::LowLatency)
+                .performance_mode(AudioPerformanceMode::None)
+                // room for twice the target at the usual 48 kHz
+                .buffer_capacity_in_frames((AAUDIO_TARGET * 2.0 * 48_000.0) as i32)
                 .open_stream()
         });
         let stream = match opened {
@@ -217,7 +240,10 @@ impl AAudio {
         let burst = stream.frames_per_burst().max(64);
         let rate = stream.sample_rate().max(1) as f64;
         let wanted = ((AAUDIO_TARGET * 2.0 * rate) as u32).div_ceil(burst as u32).max(2) as i32 * burst;
-        let size = stream.set_buffer_size_in_frames(wanted).unwrap_or(0);
+        // the size set comes back as an error from the ndk crate, which takes
+        // any result but 0 for one, so it is read back instead
+        let _ = stream.set_buffer_size_in_frames(wanted);
+        let size = stream.buffer_size_in_frames();
         if let Err(error) = stream.request_start() {
             log::warn!("could not start AAudio, playing without sound, {error:?}");
             return None;
@@ -236,6 +262,10 @@ impl Device for AAudio {
 
     fn target(&self) -> f64 {
         AAUDIO_TARGET
+    }
+
+    fn underruns(&self) -> i32 {
+        self.stream.x_run_count()
     }
 
     fn write(&mut self, frames: &[[i16; 2]]) {
@@ -392,7 +422,7 @@ mod tests {
     /// in the device.
     fn run(capacity: usize, speed: f64, minutes: f64, all_at_once: bool) -> f64 {
         let mut device = Simulated { capacity, queued: 0, played: 0 };
-        let mut pacer = Pacer::new(device.target());
+        let mut pacer = Pacer::new(device.target(), device.catch_up());
         let per_frame = (AUDIO_SAMPLE_RATE / 60.0) as usize;
         let tone: Vec<[i16; 2]> = (0..per_frame).map(|i| [((i as f32 * 0.07).sin() * 8000.0) as i16; 2]).collect();
         let mut channel: std::collections::VecDeque<Vec<[i16; 2]>> = Default::default();
