@@ -164,6 +164,16 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
             return;
         };
         let ranges: [Option<(i32, i32)>; 6] = std::array::from_fn(|axis| sticks.and_then(|_| axis_range(&device, axis)));
+        // an H700 pad short of one of ABS_Z to ABS_RZ, as the RG40XXV's
+        // seems to be, has its sticks on the axes it has, in their order, as
+        // RetroArch takes them
+        let sticks = if h700 && ranges[2..].iter().any(Option::is_none) && ranges.iter().flatten().count() >= 2 {
+            let ordered = sticks_in_order(ranges.map(|range| range.is_some()));
+            log::info!("sticks from the axes it has, {ordered:?}");
+            Some(ordered)
+        } else {
+            sticks
+        };
         let mut event = [0u8; 24];
         while device.read_exact(&mut event).is_ok() {
             let kind = u16::from_ne_bytes([event[16], event[17]]);
@@ -277,6 +287,17 @@ fn muos_button(code: u16) -> u16 {
     }
 }
 
+/// the first two axes a pad has as the left stick and the next two as the
+/// right, the R36S's stick each of axes 0 to 5 is.
+fn sticks_in_order(has: [bool; 6]) -> [Option<usize>; 6] {
+    let mut sticks = [None; 6];
+    let mut targets = [0, 1, 3, 4].into_iter();
+    for axis in (0..6).filter(|&axis| has[axis]) {
+        sticks[axis] = targets.next();
+    }
+    sticks
+}
+
 /// an axis's least and most, as the device gives them.
 fn axis_range(device: &std::fs::File, axis: usize) -> Option<(i32, i32)> {
     let mut info = [0i32; 6];
@@ -365,5 +386,20 @@ pub fn cursor_step(speed: Speed) -> f32 {
         Speed::Slow => 2.0,
         Speed::Normal => 4.0,
         Speed::Fast => 7.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sticks_in_order;
+
+    #[test]
+    fn sticks_follow_the_axes_a_pad_has() {
+        // ABS_Z to ABS_RZ, as on the H700 handhelds the usual mapping fits
+        assert_eq!(sticks_in_order([false, false, true, true, true, true]), [None, None, Some(0), Some(1), Some(3), Some(4)]);
+        // no ABS_RX: the left stick on ABS_Y and ABS_Z, as muOS reads them
+        assert_eq!(sticks_in_order([false, true, true, false, true, true]), [None, Some(0), Some(1), None, Some(3), Some(4)]);
+        // one stick only
+        assert_eq!(sticks_in_order([false, false, false, true, true, false]), [None, None, None, Some(0), Some(1), None]);
     }
 }
