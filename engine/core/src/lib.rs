@@ -52,8 +52,9 @@ pub struct Config {
     /// with hardware_renderer, the host's GPU only showing the screens, the
     /// software rasterizer drawing them.
     pub software_draws: bool,
-    /// how many times the console's resolution the host's GPU draws at.
-    pub resolution: u32,
+    /// how many times the console's resolution the host's GPU draws at, in
+    /// quarters from 1 to 4.
+    pub resolution: f32,
     /// the time the console's clock starts at, in milliseconds since 1900,
     /// the host's when none, a fixed one makes runs repeat exactly.
     pub clock: Option<u64>,
@@ -73,7 +74,7 @@ impl Default for Config {
             data_dir: None,
             hardware_renderer: false,
             software_draws: false,
-            resolution: 1,
+            resolution: 1.0,
             clock: None,
         }
     }
@@ -1023,15 +1024,15 @@ impl System {
 
     /// shows the screens on the panel the host GPU drives itself, each in
     /// its area, left, top, width and height in the panel's pixels, none
-    /// for a screen left off, the overlay over them and the top screen
+    /// for a screen left off, the overlays over them and the top screen
     /// filtered when smooth. the GPU thread shows them once it drew them,
     /// the title going on with the next frame meanwhile.
-    pub fn present_panel(&mut self, areas: [Option<[i32; 4]>; 2], cursor: Option<(i32, i32)>, overlay: Option<std::sync::Arc<zakuro_gpu::Overlay>>, smooth: bool, interpolate: bool) {
+    pub fn present_panel(&mut self, areas: [Option<[i32; 4]>; 2], cursor: Option<(i32, i32)>, overlays: Vec<std::sync::Arc<zakuro_gpu::Overlay>>, smooth: bool, interpolate: bool) {
         let black = self.lcd_force_black;
         // the screens go up again when a picture reached one, the buffers
         // shown, the layout or the overlay changed, and every sixth time
         // anyway for a screen the CPU writes itself
-        let drawn_over = overlay.as_ref().map_or(0, |overlay| std::sync::Arc::as_ptr(overlay) as usize);
+        let drawn_over = overlays.iter().fold(0usize, |hash, overlay| hash.wrapping_mul(31).wrapping_add(std::sync::Arc::as_ptr(overlay) as usize));
         let layout = Some((areas, cursor, black, smooth, drawn_over));
         let forced = self.panel.0 != layout || self.panel.1 >= 5;
         self.panel = (layout, if forced { 0 } else { self.panel.1 + 1 });
@@ -1067,7 +1068,7 @@ impl System {
                 };
                 shown[index] = Some((image, area));
             }
-            gpu.present_panel(shown, cursor, overlay, smooth, interpolate, frames);
+            gpu.present_panel(shown, cursor, overlays, smooth, interpolate, frames);
             if let Some(presents) = presents {
                 presents.fetch_sub(1, Ordering::AcqRel);
             }

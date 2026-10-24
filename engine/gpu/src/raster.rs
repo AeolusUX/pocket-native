@@ -2168,7 +2168,8 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
                 Ok(()) => return (indices.len() / 3) as u32,
                 Err(_) if fetched.is_some() => return NOT_FETCHED,
                 Err(error) if error == gles::COMPILING => {}
-                Err(error) => log::error!("the GPU could not shade, {error}, shading on the CPU"),
+                Err(error) if first_time(&error) => log::error!("the GPU could not shade, {error}, shading on the CPU"),
+                Err(_) => {}
             }
         }
     }
@@ -2216,7 +2217,8 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
         if target.buffer_width.is_multiple_of(8) && target.buffer_height.is_multiple_of(8) {
             match hardware.draw(memory, &state.hardware(registers, host::Geometry::Triangles(&triangles))) {
                 Ok(()) => return triangle_count as u32,
-                Err(error) => log::error!("the GPU could not draw, {error}, drawing in software"),
+                Err(error) if first_time(&error) => log::error!("the GPU could not draw, {error}, drawing in software"),
+                Err(_) => {}
             }
         }
         // the software path works on guest memory, which has to hold what
@@ -2864,4 +2866,16 @@ mod tests {
         assert!(differing * 100 < drawn, "{differing} of {drawn} pixels differ");
         assert!(deepest < 1 << 8, "depth differs by {deepest}");
     }
+}
+
+/// whether an error is new, to be logged the first time only: a draw that
+/// could not go to the GPU fails the same way every frame.
+pub(crate) fn first_time(error: &str) -> bool {
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if seen.len() >= 256 || seen.iter().any(|known| known == error) {
+        return false;
+    }
+    seen.push(error.to_owned());
+    true
 }

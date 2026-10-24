@@ -42,12 +42,47 @@ const BUTTONS: [(u16, PadState); 12] = [
     (RIGHT, PadState::RIGHT),
 ];
 /// a stick's travel, the most it reports.
-const STICK: f32 = 1800.0;
+pub const STICK: f32 = 1800.0;
 
 #[derive(Default)]
 pub struct Pad {
     pub keys: HashSet<u16>,
+    /// keys let go since the frontend last looked, which it takes as held
+    /// once: a phone's back gesture comes down and up at once.
+    pub let_go: HashSet<u16>,
     pub axes: [i32; 8],
+    /// the fingers on the screen, each's id and where it is in the layout's
+    /// size, from a handheld's touch screen, and those lifted since the
+    /// frontend last looked, which it takes as down once.
+    pub fingers: Vec<(i32, f32, f32)>,
+    pub lifted: Vec<(i32, f32, f32)>,
+    /// set once a gamepad is used, which hides the touch controls until a
+    /// finger is on the screen again.
+    pub pad_used: bool,
+    /// a finger on a second window's screen, across and down it from 0 to 1.
+    pub second_touch: Option<(f32, f32)>,
+}
+
+/// the pad a program around the frontend fills, in place of evdev's.
+static SHARED: std::sync::OnceLock<Arc<Mutex<Pad>>> = std::sync::OnceLock::new();
+
+/// set when the program around the frontend wants the game to stop, which
+/// saves the settings and ends it, as quitting from the menu does.
+pub static QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// the pad for the program around the frontend to fill, the same one each
+/// call, which the frontend then reads in place of evdev.
+pub fn share() -> Arc<Mutex<Pad>> {
+    SHARED.get_or_init(Default::default).clone()
+}
+
+/// set while the program around the frontend is away, an Android app in the
+/// background: the game holds still until it is back.
+pub static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// the pad shared, when there is one.
+pub fn shared() -> Option<Arc<Mutex<Pad>>> {
+    SHARED.get().cloned()
 }
 
 /// the handheld's gamepad device and its name.

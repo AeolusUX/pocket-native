@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::font::{rgba, Canvas};
 use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Buttons, Dpad, GameSettings, Layout, Power, Rotation, Settings, Speed, Stick};
+use crate::settings::{Advanced, Aspect, Buttons, Dpad, GameSettings, Layout, Power, Rotation, Settings, Speed, Stick, Stretch};
 
 const PANEL: [u8; 3] = [13, 20, 32];
 const EDGE: [u8; 3] = [40, 110, 210];
@@ -24,7 +24,10 @@ const ROW: f32 = 19.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Layout,
+    Aspect,
+    Resolution,
     Smooth,
+    Stretch,
     Interpolate,
     ShowFps,
     ShowClock,
@@ -38,6 +41,8 @@ enum Field {
     Dpad,
     ReverseTiltX,
     ReverseTiltY,
+    TouchControls,
+    EditControls,
     Resume,
     Advanced,
     Reset,
@@ -101,7 +106,7 @@ enum Page {
 impl Field {
     /// picked with A rather than changed with left and right.
     fn action(self) -> bool {
-        matches!(self, Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Compatible | Field::Defaults | Field::Back)
+        matches!(self, Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Compatible | Field::Defaults | Field::Back | Field::EditControls)
     }
 }
 
@@ -113,6 +118,8 @@ pub enum Action {
     Resume,
     Reset,
     Quit,
+    /// the touch controls to move and size.
+    EditControls,
 }
 
 /// the layouts the menu goes through, with the screens swapped or not.
@@ -126,6 +133,7 @@ const LAYOUTS: [(Layout, bool, &str); 7] = [
     (Layout::Original, false, "Original size"),
 ];
 const CAPS: [u32; 3] = [20, 30, 60];
+const RESOLUTIONS: [f32; 11] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25, 3.5];
 /// the languages and regions in cfg's order.
 const LANGUAGES: [&str; 12] = ["Japanese", "English", "French", "German", "Italian", "Spanish", "Chinese (simplified)", "Korean", "Dutch", "Portuguese", "Russian", "Chinese (traditional)"];
 const REGIONS: [&str; 7] = ["Japan", "USA", "Europe", "Australia", "China", "Korea", "Taiwan"];
@@ -141,14 +149,30 @@ pub struct Menu {
     held: u32,
 }
 
+/// whether a field does anything on this handheld: touch controls where a
+/// program around the frontend gives touches, an Android app's; filling the
+/// displays with a screen on each; turning a panel the frontend drives
+/// itself, which an Android window does on its own; and power where the
+/// launcher gives a program for it.
+fn useful(field: Field) -> bool {
+    match field {
+        Field::TouchControls | Field::EditControls => crate::input::shared().is_some(),
+        Field::Stretch => zakuro_gpu::second_window() || zakuro_gpu::stacked(),
+        Field::Rotation => crate::input::shared().is_none(),
+        Field::Power => std::env::var_os("POCKET_NATIVE_POWER").is_some(),
+        _ => true,
+    }
+}
+
 fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
     let toggles = |range: std::ops::RangeInclusive<usize>| range.map(Field::Toggle).collect();
+    let only = |fields: Vec<Field>| fields.into_iter().filter(|&field| useful(field)).collect();
     match page {
         Page::Main => vec![
-            ("Display", vec![Field::Layout, Field::Smooth, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::Rotation]),
-            ("Performance", vec![Field::FrameCap, Field::Power]),
+            ("Display", only(vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::Rotation])),
+            ("Performance", only(vec![Field::FrameCap, Field::Power])),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
-            ("Controls", vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::Dpad, Field::ReverseTiltX, Field::ReverseTiltY]),
+            ("Controls", only(vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::Dpad, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
         ],
         Page::Advanced => vec![
@@ -178,7 +202,30 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
             };
             ("Layout", value)
         }
+        Field::Aspect => (
+            "Aspect ratio",
+            match settings.aspect {
+                Aspect::Original => "Original",
+                Aspect::Integer => "Integer scale",
+                Aspect::FourThree => "4:3",
+                Aspect::SixteenTen => "16:10",
+                Aspect::SixteenNine => "16:9",
+                Aspect::Stretch => "Stretch",
+            }
+            .into(),
+        ),
+        Field::Resolution => ("Resolution", if settings.resolution == 1.0 { "Native".into() } else { format!("{}x", settings.resolution) }),
         Field::Smooth => ("Smooth scaling", if settings.smooth { "On" } else { "Off" }.into()),
+        Field::Stretch => (
+            "Fill the display",
+            match settings.stretched {
+                Stretch::Off => "Off",
+                Stretch::Top => "Top screen",
+                Stretch::Bottom => "Bottom screen",
+                Stretch::Both => "Both",
+            }
+            .into(),
+        ),
         Field::Interpolate => ("Frame interpolation", if settings.interpolate_to == 0 { "Off".into() } else { format!("Up to {} fps", settings.interpolate_to) }),
         Field::ShowFps => ("Show fps", if settings.show_fps { "On" } else { "Off" }.into()),
         Field::ShowClock => ("Clock and battery", if settings.show_clock { "On" } else { "Off" }.into()),
@@ -211,6 +258,8 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
         }
         Field::ReverseTiltX => ("Reverse tilt X", if settings.reverse_tilt_x { "On" } else { "Off" }.into()),
         Field::ReverseTiltY => ("Reverse tilt Y", if settings.reverse_tilt_y { "On" } else { "Off" }.into()),
+        Field::TouchControls => ("Touch controls", if settings.touch_controls { "On" } else { "Off" }.into()),
+        Field::EditControls => ("Edit touch controls", "→".into()),
         Field::Resume => ("Resume", String::new()),
         Field::Advanced => ("Advanced settings", "→".into()),
         Field::Reset => ("Reset", String::new()),
@@ -242,7 +291,13 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
             let (layout, swapped, _) = LAYOUTS[(at + by).rem_euclid(LAYOUTS.len() as isize) as usize];
             (settings.layout, settings.swapped) = (layout, swapped);
         }
+        Field::Aspect => settings.aspect = step(&Aspect::ALL, settings.aspect, by),
+        Field::Resolution => settings.resolution = step(&RESOLUTIONS, settings.resolution, by),
         Field::Smooth => settings.smooth = !settings.smooth,
+        Field::Stretch => {
+            let at = Stretch::ALL.iter().position(|&stretch| stretch == settings.stretched).unwrap_or(0) as isize;
+            settings.stretched = Stretch::ALL[(at + by).rem_euclid(Stretch::ALL.len() as isize) as usize];
+        }
         Field::Interpolate => settings.interpolate_to = step(&[0, 30, 60], settings.interpolate_to, by),
         Field::ShowFps => settings.show_fps = !settings.show_fps,
         Field::ShowClock => settings.show_clock = !settings.show_clock,
@@ -260,6 +315,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::Dpad => settings.dpad = step(&[Dpad::Dpad, Dpad::CirclePad, Dpad::Touch], settings.dpad, by),
         Field::ReverseTiltX => settings.reverse_tilt_x = !settings.reverse_tilt_x,
         Field::ReverseTiltY => settings.reverse_tilt_y = !settings.reverse_tilt_y,
+        Field::TouchControls => settings.touch_controls = !settings.touch_controls,
         Field::Toggle(index) => {
             let mut advanced = Advanced::of(game, profile);
             let setting = (TOGGLES[index].1)(&mut advanced);
@@ -275,7 +331,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::Region => game.region = (game.region as isize + by).rem_euclid(REGIONS.len() as isize) as u8,
         Field::Compatible => game.advanced = Some(Advanced::compatible(Advanced::of(game, profile))),
         Field::Defaults => game.advanced = None,
-        Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Back => {}
+        Field::Resume | Field::Advanced | Field::Reset | Field::Quit | Field::Restart | Field::Back | Field::EditControls => {}
     }
 }
 
@@ -283,7 +339,10 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
 fn help(field: Field, profile: &Profile) -> &str {
     match field {
         Field::Layout => "Where the screens go. A tap of L2 swaps them, FN or L3 with R1 switch to one big screen.",
+        Field::Aspect => "The screens' shape: as on the 3DS, scaled by whole pixels, the top one 4:3, 16:10 or 16:9, or both stretched to fill.",
+        Field::Resolution => "How sharp the 3D is drawn, times the 3DS's own. Higher takes more GPU. Restart the game for it.",
         Field::Smooth => "Smooths the picture as it is scaled up. Off is sharper, with uneven pixels.",
+        Field::Stretch => "With a screen on each display, the screens stretched over theirs: no bars, but out of shape.",
         Field::Interpolate => "Fills in pictures halfway between a game's, up to 30 or 60 a second. 30 costs half as much GPU time.",
         Field::ShowFps => "Pictures a second and the temperature, in the bottom right corner.",
         Field::ShowClock => "The battery and a 12-hour clock, in the bottom left corner.",
@@ -297,10 +356,12 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::Dpad => "The d-pad as itself, the circle pad or the touch cursor. FN or L3 with Select switches it in game.",
         Field::ReverseTiltX => "Holding L2, the right stick tilts the console. On tilts it the other way left and right.",
         Field::ReverseTiltY => "Holding L2, the right stick tilts the console. On tilts it the other way up and down.",
+        Field::TouchControls => "Buttons and a circle pad on the touch screen. They hide while a gamepad is used.",
+        Field::EditControls => "Move and size the touch controls, for the way the screen is held now. Done or FN to finish.",
         Field::Resume => "Back to the game. B or FN does the same.",
         Field::Advanced => "This game's switches for speed and for games that do not run right, each with a hint.",
         Field::Reset => "Starts the game again from the beginning.",
-        Field::Quit => "Back to EmulationStation.",
+        Field::Quit => if cfg!(target_os = "android") { "Back to the game list." } else { "Back to EmulationStation." },
         Field::Toggle(index) => TOGGLES[index].3,
         Field::FrameSkip => "The most pictures left out in a row while the game is behind. Off is smoother and slower.",
         Field::Language => "The console language the game is told. Games without it pick one of their own.",
@@ -398,6 +459,10 @@ impl Menu {
                 Action::Redraw
             }
             Field::Back => self.back(profile),
+            Field::EditControls => {
+                self.open = false;
+                Action::EditControls
+            }
             Field::Reset | Field::Quit | Field::Restart if self.confirm != Some(self.cursor) => {
                 self.confirm = Some(self.cursor);
                 Action::Redraw
