@@ -124,13 +124,16 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0, rgba8) uniform readonly image2D source;
 layout(binding = 1, rgba8) uniform writeonly image2D upright;
 uniform ivec2 size;
+// the source drawn at this over 4 times the console's size
+uniform int quarters;
 
 void main() {
     ivec2 at = ivec2(gl_GlobalInvocationID.xy);
     if (at.x >= size.x || at.y >= size.y) {
         return;
     }
-    imageStore(upright, at, imageLoad(source, ivec2(size.y - 1 - at.y, size.x - 1 - at.x)));
+    ivec2 from = ivec2(size.y - 1 - at.y, size.x - 1 - at.x);
+    imageStore(upright, at, imageLoad(source, (from * quarters + quarters / 2) / 4));
 }
 "#;
 
@@ -899,6 +902,22 @@ void main() {
         vec2 s = size / vec2(area.zw);
         vec2 pixel = vec2(gl_FragCoord.x - float(area.x), float(area.y + area.w) - gl_FragCoord.y) - 0.5;
         vec2 start = pixel * s;
+        // more of the screen's pixels than the area's, as one drawn bigger
+        // than shown: each of the area's averages a grid of reads spread
+        // over all the screen's pixels it covers
+        if (s.x > 1.0 || s.y > 1.0) {
+            ivec2 n = ivec2(min(ceil(s), vec2(4.0)));
+            vec3 sum = vec3(0.0);
+            for (int j = 0; j < n.y; j++) {
+                for (int i = 0; i < n.x; i++) {
+                    vec2 at = clamp(start + (vec2(float(i), float(j)) + 0.5) * s / vec2(n), vec2(0.5), size - 0.5);
+                    vec2 texel = upright != 0 ? at : vec2(float(screen.y) - at.y, float(screen.z - screen.w) - at.x);
+                    sum += texture(source, texel / vec2(textureSize(source, 0))).rgb;
+                }
+            }
+            color = vec4(sum / float(n.x * n.y), 1.0);
+            return;
+        }
         vec2 first = floor(start);
         vec2 past = clamp(((pixel + 1.0) * s - first - 1.0) / s, 0.0, 1.0);
         vec2 at = clamp(mix(first + 0.5 + past, start + 0.5 * s, step(1.0, s)), vec2(0.5), size - 0.5);
@@ -1058,11 +1077,55 @@ pub fn set_second_shows_top(top: bool) {
     SECOND_SHOWS_TOP.store(top, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// the window the panel's surface is on, which set_window waits to see go
+/// before its window may go away.
+static WINDOW_IN_USE: std::sync::atomic::AtomicPtr<c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
 /// hands the renderer a native window to show the screens in, an
-/// ANativeWindow on Android, before the title is loaded. The window has to
-/// stay valid as long as the renderer runs.
+/// ANativeWindow on Android, before the title is loaded, or a new one when
+/// the activity got its window back. Null takes it back while the app is
+/// away: that waits, a half second at most, for the GL thread to let go of
+/// it, which it does at its next present, after which the caller may let the
+/// window go.
 pub fn set_window(window: *mut c_void) {
     WINDOW.store(window, std::sync::atomic::Ordering::Release);
+    if window.is_null() {
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !WINDOW_IN_USE.load(std::sync::atomic::Ordering::Acquire).is_null() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
+/// the panel's surface onto the window set_window gave last: the old one let
+/// go, the context current on no surface while there is no window, and a new
+/// surface made for a new window. False when that failed.
+/// SAFETY: on the GL thread, the window valid until set_window takes it back
+unsafe fn follow_window(egl: &Egl, wanted: *mut c_void) -> bool {
+    let old = egl.surface();
+    if !old.is_null() {
+        if egl.egl.MakeCurrent(egl.display, egl::NO_SURFACE, egl::NO_SURFACE, egl.context) == 0 {
+            log::warn!("could not let go of the window, 0x{:X}", egl.egl.GetError());
+            return false;
+        }
+        egl.egl.DestroySurface(egl.display, old);
+        egl.surface.store(std::ptr::null_mut(), std::sync::atomic::Ordering::Release);
+        WINDOW_IN_USE.store(std::ptr::null_mut(), std::sync::atomic::Ordering::Release);
+        log::info!("the window went");
+    }
+    if wanted.is_null() {
+        return true;
+    }
+    let surface = egl.egl.CreateWindowSurface(egl.display, egl.config, wanted as glutin_egl_sys::EGLNativeWindowType, std::ptr::null());
+    if surface.is_null() || egl.egl.MakeCurrent(egl.display, surface, surface, egl.context) == 0 {
+        log::warn!("could not show the screens in the new window, 0x{:X}", egl.egl.GetError());
+        return false;
+    }
+    egl.egl.SwapInterval(egl.display, 1);
+    egl.surface.store(surface as *mut c_void, std::sync::atomic::Ordering::Release);
+    WINDOW_IN_USE.store(wanted, std::sync::atomic::Ordering::Release);
+    log::info!("the screens went to a new window");
+    true
 }
 
 /// the panel's refresh period, and how long before its refresh the last
@@ -1299,12 +1362,35 @@ impl Kms {
 
 /// the size the frontend lays the screens out in, the panel's shape with
 /// its long side across, 480 tall or 640 wide: 640x480 on a 4:3 panel,
-/// 853x480 on a 16:9 one, 640x640 on a square one.
-static LAYOUT: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
+/// 853x480 on a 16:9 one, 640x640 on a square one. A window that turns
+/// with the phone changes it. Width and height packed, 0 until set.
+static LAYOUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn layout_size() -> (u32, u32) {
-    let (width, height) = *LAYOUT.get().unwrap_or(&(640, 480));
-    (width as u32, height as u32)
+    match LAYOUT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => (640, 480),
+        packed => ((packed >> 32) as u32, packed as u32),
+    }
+}
+
+/// the panel's pixels to one of the layout's, f32 bits.
+static LAYOUT_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// how many of the panel's pixels one of the layout's is, for scaling the
+/// screens by whole pixels.
+pub fn layout_scale() -> f32 {
+    match LAYOUT_SCALE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => 1.0,
+        bits => f32::from_bits(bits),
+    }
+}
+
+/// lays the screens out for a panel this size, as it is seen once turned.
+fn set_layout(panel: (i32, i32)) {
+    let (width, height) = layout_for(panel);
+    LAYOUT.store((width as u64) << 32 | height as u64, std::sync::atomic::Ordering::Relaxed);
+    LAYOUT_SCALE.store((panel.0 as f32 / width as f32).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    log::info!("screens laid out in {width}x{height}");
 }
 
 fn layout_for((width, height): (i32, i32)) -> (i32, i32) {
@@ -1315,6 +1401,16 @@ fn layout_for((width, height): (i32, i32)) -> (i32, i32) {
     }
 }
 
+/// the size ZAKURO_PANEL_SHOT's panel stands in at, 640x480 unless
+/// ZAKURO_PANEL_SIZE=1920x1080 says, for a look at a bigger screen.
+fn offscreen_size() -> (i32, i32) {
+    static SIZE: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        let given = std::env::var("ZAKURO_PANEL_SIZE").ok();
+        given.and_then(|size| Some((size.split_once('x')?.0.parse().ok()?, size.split_once('x')?.1.parse().ok()?))).unwrap_or((640, 480))
+    })
+}
+
 /// the panel's size and the way its picture is turned, none on a landscape
 /// panel.
 fn panel_shape(output: &Output) -> ((i32, i32), Option<i32>) {
@@ -1322,11 +1418,12 @@ fn panel_shape(output: &Output) -> ((i32, i32), Option<i32>) {
         Output::Kms(kms) => kms.size(),
         Output::Fbdev(window) => (window[0] as i32, window[1] as i32),
         Output::Window(size) => *size,
-        Output::Offscreen(_) => (640, 480),
+        Output::Offscreen(_) => offscreen_size(),
     };
+    // a window turns with the device itself
     let turn = match output {
-        Output::Kms(_) | Output::Fbdev(_) | Output::Window(_) => panel_turn(size.0, size.1),
-        Output::Offscreen(_) => None,
+        Output::Kms(_) | Output::Fbdev(_) => panel_turn(size.0, size.1),
+        Output::Window(_) | Output::Offscreen(_) => None,
     };
     (size, turn)
 }
@@ -1401,9 +1498,9 @@ void main() {
 "#;
 
 /// draws a user interface over the screens, its textures made the first time
-/// they come and kept by their id.
+/// they come and kept by their id, in space's size from where fit starts.
 /// SAFETY: on the GL thread, with the panel's framebuffer bound
-unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::Overlay, height: i32, fit: Fit) -> Result<(), String> {
+unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::Overlay, height: i32, fit: Fit, space: (i32, i32)) -> Result<(), String> {
     let (program, array, vertices, indices) = match panel.overlay {
         Some(made) => made,
         None => {
@@ -1454,10 +1551,10 @@ unsafe fn draw_overlay(gl: &glow::Context, panel: &mut Panel, overlay: &crate::O
             gl.delete_texture(texture);
         }
     }
-    let [x, y, width, tall] = fit.area([0, 0, 640, 480]);
+    let [x, y, width, tall] = fit.area([0, 0, space.0, space.1]);
     gl.viewport(x, height - y - tall, width, tall);
     gl.use_program(Some(program));
-    gl.uniform_2_f32(gl.get_uniform_location(program, "size").as_ref(), 640.0, 480.0);
+    gl.uniform_2_f32(gl.get_uniform_location(program, "size").as_ref(), space.0 as f32, space.1 as f32);
     gl.uniform_1_i32(gl.get_uniform_location(program, "source").as_ref(), 0);
     gl.bind_vertex_array(Some(array));
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
@@ -1590,7 +1687,7 @@ fn second_surface(panel: &mut Panel) -> Option<(egl::types::EGLSurface, (i32, i3
             // the panel's swap waits for its refresh already, this one need not
             egl.egl.MakeCurrent(egl.display, surface, surface, egl.context);
             egl.egl.SwapInterval(egl.display, 0);
-            egl.egl.MakeCurrent(egl.display, egl.surface, egl.surface, egl.context);
+            egl.egl.MakeCurrent(egl.display, egl.surface(), egl.surface(), egl.context);
             SECOND_IN_USE.store(wanted, std::sync::atomic::Ordering::Release);
             log::info!("a screen goes to a {width}x{height} second window");
             panel.second = Some((surface, wanted, (width, height)));
@@ -1653,7 +1750,7 @@ unsafe fn draw_second(
     gl.uniform_1_i32(gl.get_uniform_location(program, "source").as_ref(), 0);
     let drawn = draw_parts(gl, panel, program, linear, None, height, fit, layout, parts);
     let swapped = egl.egl.SwapBuffers(egl.display, surface) != 0;
-    egl.egl.MakeCurrent(egl.display, egl.surface, egl.surface, egl.context);
+    egl.egl.MakeCurrent(egl.display, egl.surface(), egl.surface(), egl.context);
     drawn?;
     if !swapped {
         log::warn!("could not swap the second window's buffers, 0x{:X}", egl.egl.GetError());
@@ -1716,10 +1813,16 @@ unsafe fn draw_parts(
                         gl.use_program(Some(program));
                         (texture, screen, 0, area, smooth)
                     }
+                    Part::Overlay(overlay) if overlay.whole => {
+                        draw_overlay(gl, panel, &overlay, height, fit, layout)?;
+                        continue;
+                    }
                     Part::Overlay(overlay) => {
-                        // the menu in the middle, or on the top panel of two stacked
-                        let down = if stacked() { 0 } else { (layout.1 - 480) / 2 };
-                        draw_overlay(gl, panel, &overlay, height, fit.inset((layout.0 - 640) / 2, down))?;
+                        // the menu in the middle, or on the top panel of two
+                        // stacked, or at the top of a portrait window, over the
+                        // screens and clear of the controls under them
+                        let down = if stacked() || layout.1 > layout.0 { 0 } else { (layout.1 - 480) / 2 };
+                        draw_overlay(gl, panel, &overlay, height, fit.inset((layout.0 - 640) / 2, down), (640, 480))?;
                         continue;
                     }
                     Part::Pixels { index, pixels, width, height, area, smooth } => {
@@ -1781,6 +1884,23 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                     empty
                 }
             };
+            if let Output::Window(_) = panel.output {
+                // the app away, or back with a new window
+                let wanted = WINDOW.load(std::sync::atomic::Ordering::Acquire);
+                if (wanted != WINDOW_IN_USE.load(std::sync::atomic::Ordering::Acquire) && !follow_window(panel.egl, wanted)) || wanted.is_null() {
+                    return Ok(());
+                }
+            }
+            if let Output::Window(size) = &mut panel.output {
+                let (mut width, mut height) = (0, 0);
+                panel.egl.egl.QuerySurface(panel.egl.display, panel.egl.surface(), egl::WIDTH as i32, &mut width);
+                panel.egl.egl.QuerySurface(panel.egl.display, panel.egl.surface(), egl::HEIGHT as i32, &mut height);
+                if width > 0 && height > 0 && (width, height) != *size {
+                    log::info!("the window is {width}x{height} now");
+                    *size = (width, height);
+                    set_layout(*size);
+                }
+            }
             let ((panel_width, panel_height), turn) = panel_shape(&panel.output);
             let panel_framebuffer = match &panel.output {
                 Output::Offscreen(framebuffer) => Some(*framebuffer),
@@ -1812,7 +1932,8 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                 }
                 None => (panel_width, panel_height, panel_framebuffer),
             };
-            let layout = *LAYOUT.get().unwrap_or(&(640, 480));
+            let layout = layout_size();
+            let layout = (layout.0 as i32, layout.1 as i32);
             let fit = Fit::new(layout, (width, height));
             gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
             gl.viewport(0, 0, width, height);
@@ -1894,7 +2015,7 @@ fn show(gl: GlRef, parts: Vec<Part>) -> Result<(), String> {
                 gl.bind_texture(glow::TEXTURE_2D, Some(canvas.texture));
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
-            if panel.egl.egl.SwapBuffers(panel.egl.display, panel.egl.surface) == 0 {
+            if panel.egl.egl.SwapBuffers(panel.egl.display, panel.egl.surface()) == 0 {
                 return Err("could not swap the panel's buffers".into());
             }
             if let Some((surface, size)) = second {
@@ -1949,7 +2070,9 @@ struct Egl {
     display: egl::types::EGLDisplay,
     config: egl::types::EGLConfig,
     context: egl::types::EGLContext,
-    surface: egl::types::EGLSurface,
+    /// the panel's surface, which an activity's window going and coming
+    /// back changes.
+    surface: std::sync::atomic::AtomicPtr<c_void>,
 }
 
 // SAFETY: EGL's entry points can be called from any thread, and the handles
@@ -2039,6 +2162,10 @@ fn gbm_display(loaded: &egl::Egl) -> Option<egl::types::EGLDisplay> {
 }
 
 impl Egl {
+    fn surface(&self) -> egl::types::EGLSurface {
+        self.surface.load(std::sync::atomic::Ordering::Acquire) as egl::types::EGLSurface
+    }
+
     fn new() -> Result<(Egl, glow::Context), String> {
         let library = open(&["libEGL.so.1", "libEGL.so"]).map_err(|why| format!("could not load libEGL, {why}"))?;
         let gles = open(&["libGLESv2.so.2", "libGLESv2.so"]).ok();
@@ -2096,7 +2223,7 @@ impl Egl {
                 let Ok(c_name) = CString::new(name) else { return std::ptr::null() };
                 remember(name, loaded.GetProcAddress(c_name.as_ptr()) as *const c_void)
             });
-            Ok((Egl { libraries: (library, gles), egl: loaded, display, config, context, surface }, gl))
+            Ok((Egl { libraries: (library, gles), egl: loaded, display, config, context, surface: std::sync::atomic::AtomicPtr::new(surface as *mut c_void) }, gl))
         }
     }
 
@@ -2254,8 +2381,8 @@ impl Egl {
             let config = exact.unwrap_or(configs[0]);
             let (egl, gl) = Egl::on_window((library, gles), loaded, display, config, window as glutin_egl_sys::EGLNativeWindowType, 1)?;
             let (mut width, mut height) = (0, 0);
-            egl.egl.QuerySurface(egl.display, egl.surface, egl::WIDTH as i32, &mut width);
-            egl.egl.QuerySurface(egl.display, egl.surface, egl::HEIGHT as i32, &mut height);
+            egl.egl.QuerySurface(egl.display, egl.surface(), egl::WIDTH as i32, &mut width);
+            egl.egl.QuerySurface(egl.display, egl.surface(), egl::HEIGHT as i32, &mut height);
             if width <= 0 || height <= 0 {
                 return Err(format!("the window has no size, {width}x{height}"));
             }
@@ -2294,7 +2421,7 @@ impl Egl {
             let Ok(c_name) = CString::new(name) else { return std::ptr::null() };
             remember(name, loaded.GetProcAddress(c_name.as_ptr()) as *const c_void)
         });
-        Ok((Egl { libraries: (library, gles), egl: loaded, display, config, context, surface }, gl))
+        Ok((Egl { libraries: (library, gles), egl: loaded, display, config, context, surface: std::sync::atomic::AtomicPtr::new(surface as *mut c_void) }, gl))
     }
 
     /// a context sharing this one's objects, made current on the calling
@@ -2336,6 +2463,7 @@ impl Egl {
         let window = WINDOW.load(std::sync::atomic::Ordering::Acquire);
         if !window.is_null() {
             let (egl, gl, size) = Egl::new_window(window)?;
+            WINDOW_IN_USE.store(window, std::sync::atomic::Ordering::Release);
             log::info!("the screens go to a {}x{} window", size.0, size.1);
             return Ok((egl, gl, Some(Output::Window(size))));
         }
@@ -3238,7 +3366,8 @@ impl Worker {
                         None if std::env::var_os("ZAKURO_PANEL_SHOT").is_some() => unsafe {
                             let image = gl.create_renderbuffer().expect("a renderbuffer for the panel");
                             gl.bind_renderbuffer(glow::RENDERBUFFER, Some(image));
-                            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA8, 640, 480);
+                            let (width, height) = offscreen_size();
+                            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA8, width, height);
                             let framebuffer = gl.create_framebuffer().expect("a framebuffer for the panel");
                             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
                             gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(image));
@@ -3248,9 +3377,7 @@ impl Worker {
                     };
                     if let Some(output) = output {
                         let ((width, height), turn) = panel_shape(&output);
-                        let layout = layout_for(if turn.is_some() { (height, width) } else { (width, height) });
-                        let _ = LAYOUT.set(layout);
-                        log::info!("screens laid out in {}x{}", layout.0, layout.1);
+                        set_layout(if turn.is_some() { (height, width) } else { (width, height) });
                         PANEL.with(|screen| *screen.borrow_mut() = Some(Panel { egl, output, program: None, textures: [None, None], empty: None, linear: None, overlay: None, overlay_textures: HashMap::new(), between: Between::default(), canvas: None, second: None }));
                     }
                     let gl: &'static glow::Context = Box::leak(Box::new(gl));
@@ -3382,6 +3509,12 @@ pub struct Gles {
     pictures: u64,
     warned_logic_op: bool,
     preloading: bool,
+    /// the console's resolution times this over 4 is what the surfaces are
+    /// drawn at, 4 native.
+    quarters: u32,
+    /// textures and framebuffers the console's size, by depth or not and
+    /// size, which a surface drawn bigger goes through to and from memory.
+    natives: rustc_hash::FxHashMap<(bool, u32, u32), (glow::Texture, glow::Framebuffer)>,
 }
 
 impl Gles {
@@ -3469,6 +3602,8 @@ impl Gles {
                 pictures: 0,
                 warned_logic_op: false,
                 preloading: false,
+                quarters: 4,
+                natives: Default::default(),
             };
             gles.preload();
             gles.prepare_stand_ins();
@@ -3550,12 +3685,82 @@ impl Gles {
         self.shades
     }
 
+    /// the scale pictures read back come at: always the console's own, the
+    /// surfaces drawn bigger are brought down to it.
     pub fn scale(&self) -> u32 {
         1
     }
 
-    pub fn set_scale(&mut self, _scale: u32) -> u32 {
-        1
+    /// draws at scale times the console's resolution from now on, in
+    /// quarters from 1 to 4, and says what it draws at.
+    pub fn set_scale(&mut self, scale: f32) -> f32 {
+        self.quarters = (scale * 4.0).round().clamp(4.0, 16.0) as u32;
+        self.quarters as f32 / 4.0
+    }
+
+    /// a length of the console's in the surfaces' pixels: whole for any
+    /// multiple of 4, as every tile and surface edge is.
+    fn up(&self, length: u32) -> u32 {
+        length * self.quarters / 4
+    }
+
+    fn scaled(&self) -> bool {
+        self.quarters != 4
+    }
+
+    /// the console-size texture and framebuffer for a kind of surface and
+    /// size.
+    /// SAFETY: on the GL thread
+    unsafe fn native(&mut self, depth: bool, width: u32, height: u32) -> Result<(glow::Texture, glow::Framebuffer), String> {
+        if let Some(&made) = self.natives.get(&(depth, width, height)) {
+            return Ok(made);
+        }
+        let gl = &self.gl;
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_storage_2d(glow::TEXTURE_2D, 1, if depth { glow::DEPTH24_STENCIL8 } else { glow::RGBA8 }, width as i32, height as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+        let framebuffer = gl.create_framebuffer()?;
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+        if depth {
+            gl.draw_buffers(&[glow::NONE]);
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_STENCIL_ATTACHMENT, glow::TEXTURE_2D, Some(texture), 0);
+        } else {
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
+        }
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        self.natives.insert((depth, width, height), (texture, framebuffer));
+        Ok((texture, framebuffer))
+    }
+
+    /// rows of a surface, from the bottom as GL counts them, between it and
+    /// its console-size twin, the nearest pixel scaled each way: up after an
+    /// upload into the twin, or down to read it back.
+    /// SAFETY: on the GL thread
+    unsafe fn through_native(&mut self, index: usize, up: bool, rows: &[(u32, u32)]) -> Result<(glow::Texture, glow::Framebuffer), String> {
+        let (width, height, kind) = (self.surfaces[index].width, self.surfaces[index].height, self.surfaces[index].kind);
+        let depth = matches!(kind, Kind::Depth(_));
+        let native = self.native(depth, width, height)?;
+        let surface = if depth { self.framebuffer(None, Some(index))? } else { self.framebuffer(Some(index), None)? };
+        let (from, to) = if up { (native.1, surface) } else { (surface, native.1) };
+        let mask = if depth { glow::DEPTH_BUFFER_BIT | glow::STENCIL_BUFFER_BIT } else { glow::COLOR_BUFFER_BIT };
+        disturb();
+        let (big_width, small_width) = (self.up(width) as i32, width as i32);
+        let gl = &self.gl;
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(to));
+        gl.disable(glow::SCISSOR_TEST);
+        gl.color_mask(true, true, true, true);
+        gl.depth_mask(true);
+        gl.stencil_mask(0xFF);
+        for &(bottom, count) in rows {
+            let (small, big) = ([0, bottom as i32, small_width, (bottom + count) as i32], [0, self.up(bottom) as i32, big_width, self.up(bottom + count) as i32]);
+            let (a, b) = if up { (small, big) } else { (big, small) };
+            gl.blit_framebuffer(a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], mask, glow::NEAREST);
+        }
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        Ok(native)
     }
 
     fn texture_source(&self, texture: &DrawnTexture) -> Option<(usize, u32)> {
@@ -3634,7 +3839,7 @@ impl Gles {
             return Ok((copiers, copy));
         }
         let (copy, framebuffer) = (self.texture_name()?, self.framebuffer_name()?);
-        let (gl, width, height) = (self.gl, texture.width as i32, texture.height as i32);
+        let (gl, width, height) = (self.gl, self.up(texture.width) as i32, self.up(texture.height) as i32);
         self.worker.post_keeping(move || {
             disturb();
             // SAFETY: on the GL thread, the names are new and the copy is the
@@ -3659,8 +3864,8 @@ impl Gles {
             return Ok(copy);
         }
         let (kind, image) = (surface.kind, surface.texture);
-        let base = surface.height as i32 - 1 - row as i32;
-        let (width, height) = (texture.width as i32, texture.height as i32);
+        let base = self.up(surface.height) as i32 - 1 - self.up(row) as i32;
+        let (width, height) = (self.up(texture.width) as i32, self.up(texture.height) as i32);
         let opaque = matches!(texture.format, ColorFormat::Rgb8 | ColorFormat::Rgb565) as i32;
         let levels = match texture.format {
             ColorFormat::Rgba8 | ColorFormat::Rgb8 => [255.0; 4],
@@ -3774,6 +3979,9 @@ impl Gles {
         let gl = self.gl;
         let t = t.clone();
         let (source_texture, target_texture) = (self.surfaces[source].texture, self.surfaces[target].texture);
+        // in the surfaces' pixels: the copy, the rows, and where it reads
+        let quarters = self.quarters;
+        let up = move |length: u32| length * quarters / 4;
         self.worker.post(move || unsafe {
             disturb();
             // SAFETY: on the GL thread, both textures have immutable rgba8
@@ -3781,18 +3989,18 @@ impl Gles {
             gl.use_program(Some(program));
             let int = |name: &str, value: i32| gl.uniform_1_i32(gl.get_uniform_location(program, name).as_ref(), value);
             let pair = |name: &str, x: u32, y: u32| gl.uniform_2_i32(gl.get_uniform_location(program, name).as_ref(), x as i32, y as i32);
-            pair("size", t.copy.0, t.copy.1);
+            pair("size", up(t.copy.0), up(t.copy.1));
             pair("scale", t.scale.0, t.scale.1);
-            int("input_height", t.input_height as i32);
-            int("output_height", t.output_height as i32);
+            int("input_height", up(t.input_height) as i32);
+            int("output_height", up(t.output_height) as i32);
             int("flip", t.flip as i32);
             int("input_format", format_index(t.input_format));
             int("output_format", format_index(t.output_format));
-            int("source_row", row as i32);
-            int("source_height", input_size.1 as i32);
+            int("source_row", up(row) as i32);
+            int("source_height", up(input_size.1) as i32);
             gl.bind_image_texture(0, Some(source_texture), 0, false, 0, glow::READ_ONLY, glow::RGBA8);
             gl.bind_image_texture(1, Some(target_texture), 0, false, 0, glow::WRITE_ONLY, glow::RGBA8);
-            gl.dispatch_compute(t.copy.0.div_ceil(8), t.copy.1.div_ceil(8), 1);
+            gl.dispatch_compute(up(t.copy.0).div_ceil(8), up(t.copy.1).div_ceil(8), 1);
             gl.memory_barrier(glow::ALL_BARRIER_BITS);
         });
         let target = &mut self.surfaces[target];
@@ -3877,6 +4085,7 @@ impl Gles {
             }
         };
         let (up_width, up_height) = (height, width);
+        let quarters = self.quarters;
         disturb();
         let gl = &self.gl;
         let surface = &mut self.surfaces[index];
@@ -3899,6 +4108,7 @@ impl Gles {
             };
             gl.use_program(Some(program));
             gl.uniform_2_i32(gl.get_uniform_location(program, "size").as_ref(), up_width as i32, up_height as i32);
+            gl.uniform_1_i32(gl.get_uniform_location(program, "quarters").as_ref(), quarters as i32);
             gl.bind_image_texture(0, Some(surface.texture), 0, false, 0, glow::READ_ONLY, glow::RGBA8);
             gl.bind_image_texture(1, Some(texture), 0, false, 0, glow::WRITE_ONLY, glow::RGBA8);
             gl.dispatch_compute(up_width.div_ceil(8), up_height.div_ceil(8), 1);
@@ -4134,6 +4344,7 @@ impl Gles {
         let index = match found {
             Some(index) => index,
             None => {
+                let (drawn_width, drawn_height) = (self.up(width) as i32, self.up(height) as i32);
                 let gl = &self.gl;
                 // SAFETY: the context is current
                 let texture = unsafe {
@@ -4143,7 +4354,7 @@ impl Gles {
                         Kind::Color(_) => glow::RGBA8,
                         Kind::Depth(_) => glow::DEPTH24_STENCIL8,
                     };
-                    gl.tex_storage_2d(glow::TEXTURE_2D, 1, format, width as i32, height as i32);
+                    gl.tex_storage_2d(glow::TEXTURE_2D, 1, format, drawn_width, drawn_height);
                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
                     texture
@@ -4243,6 +4454,7 @@ impl Gles {
             Kind::Depth(_) => (self.framebuffer(None, Some(other))?, self.framebuffer(None, Some(index))?, glow::DEPTH_BUFFER_BIT | glow::STENCIL_BUFFER_BIT),
         };
         disturb();
+        let quarters = self.quarters as i64;
         let gl = &self.gl;
         // SAFETY: on the GL thread, every tile copied lies inside both
         // surfaces
@@ -4253,16 +4465,18 @@ impl Gles {
             gl.color_mask(true, true, true, true);
             gl.depth_mask(true);
             gl.stencil_mask(0xFF);
+            // in the surfaces' pixels, whole for tiles at any scale
+            let up = |length: i64| (length * quarters / 4) as i32;
             let blit = |(x, y): (i64, i64), (to_x, to_y): (i64, i64), (wide, high): (i64, i64)| {
                 gl.blit_framebuffer(
-                    x as i32,
-                    (other_height - y - high) as i32,
-                    (x + wide) as i32,
-                    (other_height - y) as i32,
-                    to_x as i32,
-                    (height - to_y - high) as i32,
-                    (to_x + wide) as i32,
-                    (height - to_y) as i32,
+                    up(x),
+                    up(other_height - y - high),
+                    up(x + wide),
+                    up(other_height - y),
+                    up(to_x),
+                    up(height - to_y - high),
+                    up(to_x + wide),
+                    up(height - to_y),
                     mask,
                     glow::NEAREST,
                 )
@@ -4295,7 +4509,16 @@ impl Gles {
         let _timed = timed(2);
         self.surfaces[index].version = next_version();
         let s = &self.surfaces[index];
-        let (width, height, kind, tiled, texture) = (s.width, s.height, s.kind, s.tiled, s.texture);
+        let (width, height, kind, tiled, mut texture) = (s.width, s.height, s.kind, s.tiled, s.texture);
+        // drawn bigger, the pixels go into the console-size twin first
+        if self.scaled() {
+            // SAFETY: on the GL thread, as uploads are
+            match unsafe { self.native(matches!(kind, Kind::Depth(_)), width, height) } {
+                Ok((native, _)) => texture = native,
+                Err(error) => log::error!("could not upload a surface drawn bigger, {error}"),
+            }
+        }
+        let s = &self.surfaces[index];
         let pixels = (width * height) as usize;
         let ranges: Vec<(u32, u32)> = match s.dirty {
             Some((start, end)) => [(0, start), (end, height)].into_iter().filter(|(from, to)| from < to).collect(),
@@ -4366,6 +4589,13 @@ impl Gles {
                         );
                     }
                 }
+            }
+        }
+        if self.scaled() {
+            let rows: Vec<(u32, u32)> = ranges.iter().map(|&(from, to)| (height - to, to - from)).collect();
+            // SAFETY: on the GL thread, as uploads are
+            if let Err(error) = unsafe { self.through_native(index, true, &rows) } {
+                log::error!("could not upload a surface drawn bigger, {error}");
             }
         }
     }
@@ -4574,7 +4804,7 @@ impl Gles {
         link(&self.gl, vertex, fragment)
     }
 
-    pub(crate) fn present(&mut self, shown: [Option<(crate::PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlay: Option<Arc<crate::Overlay>>, smooth: bool, interpolate: bool) {
+    pub(crate) fn present(&mut self, shown: [Option<(crate::PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlays: Vec<Arc<crate::Overlay>>, smooth: bool, interpolate: bool) {
         let mut parts = Vec::new();
         for (index, item) in shown.into_iter().enumerate() {
             let Some((image, area)) = item else { continue };
@@ -4585,9 +4815,12 @@ impl Gles {
                         s.addr == screen.addr && s.width == width && s.height == height && s.kind == Kind::Color(screen.format) && !s.tiled
                     });
                     if let Some(s) = found {
-                        let screen = [screen.rows.1 as i32, screen.columns as i32, s.height as i32, screen.rows.0 as i32];
+                        let up = |length: u32| self.up(length) as i32;
+                        let screen = [up(screen.rows.1), up(screen.columns), up(s.height), up(screen.rows.0)];
                         let top = index == 0;
-                        parts.push(Part::Surface { texture: s.texture, screen, area, smooth: smooth && top, top, picture: (interpolate && top).then_some(s.version) });
+                        // the bottom screen too once it is drawn bigger, its pixels no longer the console's
+                        let smooth = smooth && (top || self.scaled());
+                        parts.push(Part::Surface { texture: s.texture, screen, area, smooth, top, picture: (interpolate && top).then_some(s.version) });
                     }
                 }
                 crate::PanelImage::Pixels(pixels, width, height) => parts.push(Part::Pixels { index, pixels, width, height, area, smooth: smooth && index == 0 }),
@@ -4596,7 +4829,7 @@ impl Gles {
         if let Some((x, y)) = cursor {
             parts.push(Part::Cursor { x, y });
         }
-        parts.extend(overlay.map(Part::Overlay));
+        parts.extend(overlays.into_iter().map(Part::Overlay));
         // with two waiting for the panel already, this one waits its turn:
         // dropped, its frame would have been drawn for nothing, where held
         // up, the title falls behind and skips drawing frames instead
@@ -4615,7 +4848,9 @@ impl Gles {
         });
     }
 
-    fn read_depth(&mut self, index: usize, data: &mut [u8]) -> Result<(), String> {
+    /// a depth surface's depth and stencil packed into color and read, from
+    /// its console-size twin when it is drawn bigger.
+    fn read_depth(&mut self, index: usize, native: Option<glow::Texture>, data: &mut [u8]) -> Result<(), String> {
         let _timed = timed(4);
         disturb();
         let (depth, stencil, empty) = match self.packers {
@@ -4631,7 +4866,7 @@ impl Gles {
         };
         let gl = &self.gl;
         let surface = &mut self.surfaces[index];
-        let (width, height, texture) = (surface.width as i32, surface.height as i32, surface.texture);
+        let (width, height, texture) = (surface.width as i32, surface.height as i32, native.unwrap_or(surface.texture));
         let with_stencil = surface.kind == Kind::Depth(4);
         // SAFETY: the context is current, the packed texture is the size of
         // the surface and the buffer covers it
@@ -4729,9 +4964,15 @@ impl Gles {
                 continue;
             }
             let mut data = vec![0u8; (width * height * 4) as usize];
+            // drawn bigger, it comes down to the console's size first
+            // SAFETY: on the GL thread, as write backs are
+            let native = if self.scaled() { Some(unsafe { self.through_native(index, false, &[(0, height)])? }) } else { None };
             match kind {
                 Kind::Color(_) => {
-                    let framebuffer = self.framebuffer(Some(index), None)?;
+                    let framebuffer = match native {
+                        Some((_, framebuffer)) => framebuffer,
+                        None => self.framebuffer(Some(index), None)?,
+                    };
                     disturb();
                     let gl = &self.gl;
                     // SAFETY: the context is current, the buffer covers the surface
@@ -4742,7 +4983,7 @@ impl Gles {
                         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                     }
                 }
-                Kind::Depth(_) => self.read_depth(index, &mut data)?,
+                Kind::Depth(_) => self.read_depth(index, native.map(|(texture, _)| texture), &mut data)?,
             }
             let s = &self.surfaces[index];
             let bpp = kind.bytes() as usize;
@@ -5133,15 +5374,18 @@ impl Gles {
         }
         let framebuffer = self.framebuffer(Some(color), depth)?;
 
+        // the viewport and scissor in the surfaces' pixels
+        let k = self.quarters as f32 / 4.0;
+        let up = |length: i32| (length as f32 * k).round() as i32;
         let geometry = match draw.geometry {
             Geometry::Triangles(triangles) => Submit::Triangles {
-                viewport: [0, raise, draw.width as i32, draw.height as i32],
+                viewport: [0, up(raise), up(draw.width as i32), up(draw.height as i32)],
                 vertices: Self::triangles(triangles, (draw.width as f32, draw.height as f32), depth_map),
                 count: (triangles.len() * 3) as i32,
             },
             Geometry::Shaded(shading) => {
                 let (x, y, width, height) = shading.viewport;
-                let viewport = [x.round() as i32, (y + raise as f32).round() as i32, width.round() as i32, height.round() as i32];
+                let viewport = [(x * k).round() as i32, ((y + raise as f32) * k).round() as i32, (width * k).round() as i32, (height * k).round() as i32];
                 let shaded = timed(16);
                 let (uniforms, inputs, stride) = Self::shading_bytes(shading, depth_map);
                 let attributes = match shading.fetched {
@@ -5207,7 +5451,7 @@ impl Gles {
             framebuffer,
             program,
             depth_range,
-            scissor: [left, bottom, right - left, top - bottom],
+            scissor: [up(left), up(bottom), up(right) - up(left), up(top) - up(bottom)],
             color_mask,
             blend: blend.map(|config| (config, r[REG_BLEND_COLOR])),
             depth: if depth.is_some() && (depth_test || depth_write) {
@@ -5228,7 +5472,9 @@ impl Gles {
         let gl = self.gl;
         self.worker.post_draw(move || {
             if let Err(error) = job.submit(gl) {
-                log::error!("the GPU could not draw, {error}");
+                if super::first_time(&error) {
+                    log::error!("the GPU could not draw, {error}");
+                }
             }
         });
         Ok(())

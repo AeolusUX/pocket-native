@@ -24,8 +24,9 @@ fn main() {
         recompiled: std::env::var("ZAKURO_RECOMPILED").ok().map(Into::into),
         // ZAKURO_RASTERIZER=hardware draws on the host GPU.
         hardware_renderer: std::env::var("ZAKURO_RASTERIZER").is_ok_and(|v| v == "hardware"),
-        // ZAKURO_RESOLUTION=3 draws at three times the console's resolution.
-        resolution: std::env::var("ZAKURO_RESOLUTION").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
+        // ZAKURO_RESOLUTION=3 draws at three times the console's resolution,
+        // in quarters, 1.5 too.
+        resolution: std::env::var("ZAKURO_RESOLUTION").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
         // ZAKURO_CLOCK=milliseconds since 1900 starts the clock there, so that
         // runs repeat exactly.
         clock: std::env::var("ZAKURO_CLOCK").ok().and_then(|v| v.parse().ok()),

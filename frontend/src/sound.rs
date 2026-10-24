@@ -27,6 +27,8 @@ trait Device {
     fn catch_up(&self) -> (f64, f64) {
         (self.target() * 4.0, self.target())
     }
+    /// stops while no sound comes, the game paused, or starts again.
+    fn idle(&mut self, _idle: bool) {}
 }
 
 pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
@@ -37,7 +39,23 @@ pub fn play(samples: mpsc::Receiver<Vec<[i16; 2]>>) {
         };
         let mut pacer = Pacer::new(device.target(), device.catch_up());
         let mut since_log = std::time::Instant::now();
-        while let Ok(first) = samples.recv() {
+        loop {
+            // half a second with nothing, the game paused or the app away,
+            // and the device stops until sound comes again
+            let first = match samples.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(first) => first,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    device.idle(true);
+                    match samples.recv() {
+                        Ok(first) => {
+                            device.idle(false);
+                            first
+                        }
+                        Err(_) => break,
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             // everything waiting, taken at once, so that how far the sound is
             // behind counts it: left in the channel it would pile up unseen
             let mut input = first;
@@ -266,6 +284,10 @@ impl Device for AAudio {
 
     fn underruns(&self) -> i32 {
         self.stream.x_run_count()
+    }
+
+    fn idle(&mut self, idle: bool) {
+        let _ = if idle { self.stream.request_pause() } else { self.stream.request_start() };
     }
 
     fn write(&mut self, frames: &[[i16; 2]]) {

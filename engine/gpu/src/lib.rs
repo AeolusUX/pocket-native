@@ -17,7 +17,7 @@ use registers::*;
 pub use overlay::{Overlay, OverlayMesh, OverlayTexture, OverlayVertex};
 pub use renderer::{DrawCall, Renderer, SoftwareRenderer};
 #[cfg(feature = "gles")]
-pub use raster::gles::{layout_size, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_window, stacked};
+pub use raster::gles::{layout_scale, layout_size, panel_timing, second_window, set_drops, set_second_shows_top, set_second_stretched, set_second_window, set_stacked, set_window, stacked};
 
 /// how the GPU reaches guest memory.
 pub trait GpuMemory {
@@ -903,7 +903,7 @@ impl Gpu {
     /// sharper pictures. on the device of a Vulkan presenter, when it gives
     /// one, the screens are shown straight from the images drawn.
     #[cfg(feature = "gles")]
-    pub fn enable_hardware_renderer(&mut self, scale: u32) -> Result<String, String> {
+    pub fn enable_hardware_renderer(&mut self, scale: f32) -> Result<String, String> {
         let mut hardware = raster::gles::Gles::new()?;
         let scale = hardware.set_scale(scale);
         let shaded = if hardware.shades() { "" } else { ", vertices shaded on the CPU," };
@@ -921,16 +921,16 @@ impl Gpu {
     }
 
     /// shows the screens on the panel the GPU drives itself, each in its
-    /// area, left, top, width and height in the panel's pixels, the overlay
+    /// area, left, top, width and height in the panel's pixels, the overlays
     /// over them, the top screen filtered when smooth and a picture halfway
     /// between its last two shown first when interpolating.
-    pub fn present_panel(&mut self, shown: [Option<(PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlay: Option<std::sync::Arc<Overlay>>, smooth: bool, interpolate: bool) {
+    pub fn present_panel(&mut self, shown: [Option<(PanelImage, [i32; 4])>; 2], cursor: Option<(i32, i32)>, overlays: Vec<std::sync::Arc<Overlay>>, smooth: bool, interpolate: bool) {
         #[cfg(feature = "gles")]
         if let Some(hardware) = self.resources.hardware.as_mut().or(self.panel.as_mut()) {
-            hardware.present(shown, cursor, overlay, smooth, interpolate);
+            hardware.present(shown, cursor, overlays, smooth, interpolate);
         }
         #[cfg(not(feature = "gles"))]
-        let _ = (shown, cursor, overlay, smooth, interpolate);
+        let _ = (shown, cursor, overlays, smooth, interpolate);
     }
 
     /// how many times the console's resolution the host's GPU draws at, 1

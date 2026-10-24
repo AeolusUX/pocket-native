@@ -66,8 +66,8 @@ fn android_main(app: AndroidApp) {
     let (window_width, window_height) = (window.width(), window.height());
     // a window half again taller than wide is both panels stacked, as
     // GammaOS's DualStack gives it to an app on its list: 640x960 on the RG
-    // DS, where the app's own is 640x480
-    let stacked = window_height * 4 > window_width * 5;
+    // DS, where the app's own is 640x480. A phone held upright is taller still
+    let stacked = window_height * 2 == window_width * 3;
     zakuro_gpu::set_stacked(stacked);
     zakuro_gpu::set_window(window.ptr().as_ptr().cast());
     for axis in [Axis::Z, Axis::Rz, Axis::Rx, Axis::Ry, Axis::HatX, Axis::HatY, Axis::Ltrigger, Axis::Rtrigger, Axis::Gas, Axis::Brake] {
@@ -84,22 +84,42 @@ fn android_main(app: AndroidApp) {
             Err(error) => log::warn!("could not show the second screen, {error}"),
         }
     }
+    ACTIVITY.store(app.activity_as_ptr(), Ordering::Relaxed);
+    VM.store(app.vm_as_ptr(), Ordering::Relaxed);
+    let _ = pocket_native::BEFORE_EXIT.set(finish);
     let rom = folder.join("game.3ds").to_string_lossy().into_owned();
     let game = std::thread::Builder::new().name("game".into()).spawn(move || pocket_native::run(vec![rom])).expect("a thread for the game");
 
+    let mut window = Some(window);
     loop {
-        app.poll_events(Some(Duration::from_millis(8)), |event| {
-            // the window going away, the app sent to the background or closed,
-            // ends the game as quitting from the menu does
-            if let PollEvent::Main(MainEvent::TerminateWindow { .. } | MainEvent::Destroy | MainEvent::Pause) = event {
-                input::QUIT.store(true, Ordering::Relaxed);
+        app.poll_events(Some(Duration::from_millis(8)), |event| match event {
+            // the app away holds the game still, back it goes on
+            PollEvent::Main(MainEvent::Pause) => input::PAUSED.store(true, Ordering::Relaxed),
+            PollEvent::Main(MainEvent::Resume { .. }) => input::PAUSED.store(false, Ordering::Relaxed),
+            // its window goes while it is away, the renderer letting go of it
+            // first, and a new one comes back
+            PollEvent::Main(MainEvent::TerminateWindow { .. }) => {
+                zakuro_gpu::set_window(std::ptr::null_mut());
+                window = None;
             }
+            PollEvent::Main(MainEvent::InitWindow { .. }) => {
+                window = app.native_window();
+                if let Some(window) = &window {
+                    zakuro_gpu::set_window(window.ptr().as_ptr().cast());
+                }
+            }
+            // closed for good, which ends the game as quitting from the menu does
+            PollEvent::Main(MainEvent::Destroy) => input::QUIT.store(true, Ordering::Relaxed),
+            _ => {}
         });
-        if let Ok(mut events) = app.input_events_iter() {
-            while events.next(|event| handle(event, &pad, (window_width, window_height))) {}
+        // the window's size now, which turns with the phone
+        let size = window.as_ref().map(|window| (window.width(), window.height()));
+        if let (Ok(mut events), Some(size)) = (app.input_events_iter(), size) {
+            while events.next(|event| handle(event, &pad, size)) {}
         }
         // run only returns when it panicked, it ends the process otherwise
         if game.is_finished() {
+            finish(1);
             std::process::exit(1);
         }
     }
@@ -154,17 +174,20 @@ fn set_up(own: &Path, folder: &Path, data: &Path) {
 
 /// one event into the pad, handled when it was the gamepad's or the touch
 /// screen's, so that the system does not take B for back.
-fn handle(event: &InputEvent, pad: &std::sync::Mutex<Pad>, window: (i32, i32)) -> InputStatus {
+fn handle(event: &InputEvent, pad: &std::sync::Mutex<Pad>, size: (i32, i32)) -> InputStatus {
     match event {
         InputEvent::KeyEvent(key) => {
             let Some(code) = button(key.key_code()) else { return InputStatus::Unhandled };
             let mut pad = pad.lock().unwrap();
+            // a phone's own back and menu keys leave the touch controls up
+            pad.pad_used |= !matches!(key.key_code(), Keycode::Back | Keycode::Menu);
             match key.action() {
                 KeyAction::Down => {
                     pad.keys.insert(code);
                 }
                 KeyAction::Up => {
                     pad.keys.remove(&code);
+                    pad.let_go.insert(code);
                 }
                 _ => {}
             }
@@ -174,13 +197,24 @@ fn handle(event: &InputEvent, pad: &std::sync::Mutex<Pad>, window: (i32, i32)) -
             let source: u32 = motion.source().into();
             let mut pad = pad.lock().unwrap();
             if source & TOUCHSCREEN == TOUCHSCREEN {
-                pad.touch = match motion.action() {
-                    MotionAction::Down | MotionAction::Move | MotionAction::PointerDown => {
-                        let pointer = motion.pointer_at_index(0);
-                        Some(to_layout(pointer.x(), pointer.y(), window))
-                    }
+                let at = |index: usize| {
+                    let pointer = motion.pointer_at_index(index);
+                    let (x, y) = to_layout(pointer.x(), pointer.y(), size);
+                    (pointer.pointer_id(), x, y)
+                };
+                // every finger down but the one going up
+                let leaving = match motion.action() {
+                    MotionAction::Up | MotionAction::PointerUp => Some(motion.pointer_index()),
                     _ => None,
                 };
+                pad.fingers = match motion.action() {
+                    MotionAction::Cancel => Vec::new(),
+                    _ => (0..motion.pointer_count()).filter(|&index| Some(index) != leaving).map(at).collect(),
+                };
+                if let Some(index) = leaving {
+                    pad.lifted.push(at(index));
+                }
+                pad.pad_used = false;
                 InputStatus::Handled
             } else if source & JOYSTICK == JOYSTICK {
                 let pointer = motion.pointer_at_index(0);
@@ -191,6 +225,7 @@ fn handle(event: &InputEvent, pad: &std::sync::Mutex<Pad>, window: (i32, i32)) -
                 } else {
                     (axis(Axis::Z), axis(Axis::Rz))
                 };
+                pad.pad_used |= [Axis::X, Axis::Y, Axis::HatX, Axis::HatY].iter().any(|&moved| axis(moved).abs() > 0.5);
                 pad.axes[0] = (axis(Axis::X) * STICK) as i32;
                 pad.axes[1] = (axis(Axis::Y) * STICK) as i32;
                 pad.axes[3] = (right_x * STICK) as i32;
@@ -239,7 +274,8 @@ fn button(key: Keycode) -> Option<u16> {
         Keycode::ButtonThumbr => R3,
         Keycode::ButtonSelect => SELECT,
         Keycode::ButtonStart => START,
-        Keycode::ButtonMode | Keycode::Menu => FN,
+        // Back too, which a phone has in place of FN
+        Keycode::ButtonMode | Keycode::Menu | Keycode::Back => FN,
         Keycode::DpadUp | Keycode::DpadDown | Keycode::DpadLeft | Keycode::DpadRight => {
             HATS_AS_KEYS.store(true, Ordering::Relaxed);
             match key {
@@ -266,6 +302,28 @@ fn to_layout(x: f32, y: f32, (width, height): (i32, i32)) -> (f32, f32) {
 
 /// the second display's window, acquired from its surface, null for none.
 static SECOND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// the activity and its VM, for finishing it from the game's thread.
+static ACTIVITY: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static VM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// finishes the activity with the game's exit code: 3 has the launcher start
+/// the game again.
+fn finish(code: i32) {
+    let (vm, activity) = (VM.load(Ordering::Relaxed), ACTIVITY.load(Ordering::Relaxed));
+    if vm.is_null() || activity.is_null() {
+        return;
+    }
+    // SAFETY: the VM and activity android_main was given, which live as long
+    // as the app
+    let Ok(vm) = (unsafe { JavaVM::from_raw(vm.cast()) }) else { return };
+    let Ok(mut env) = vm.attach_current_thread_permanently() else { return };
+    let activity = unsafe { JObject::from_raw(activity.cast()) };
+    let _ = env.call_method(&activity, "finishWith", "(I)V", &[JValue::Int(code)]);
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+}
 
 /// the intent's "game" extra, the folder of the game to play.
 fn game_extra(app: &AndroidApp) -> Result<Option<String>, String> {

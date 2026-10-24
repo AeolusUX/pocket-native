@@ -37,6 +37,33 @@ impl Stretch {
     }
 }
 
+/// the screens' shape: the top one's as on the console, scaled by whole
+/// pixels, made narrower or wider, or both stretched over the room they have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Aspect {
+    #[default]
+    Original,
+    Integer,
+    FourThree,
+    SixteenTen,
+    SixteenNine,
+    Stretch,
+}
+
+impl Aspect {
+    pub const ALL: [Aspect; 6] = [Aspect::Original, Aspect::Integer, Aspect::FourThree, Aspect::SixteenTen, Aspect::SixteenNine, Aspect::Stretch];
+
+    /// the top screen's width over its height.
+    pub fn ratio(self) -> f32 {
+        match self {
+            Aspect::FourThree => 4.0 / 3.0,
+            Aspect::SixteenTen => 16.0 / 10.0,
+            Aspect::SixteenNine => 16.0 / 9.0,
+            Aspect::Original | Aspect::Integer | Aspect::Stretch => 5.0 / 3.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Power {
     Saver,
@@ -88,6 +115,10 @@ pub struct Settings {
     /// with a screen on each display, which of them fill their displays
     /// rather than keep their shape with bars.
     pub stretched: Stretch,
+    pub aspect: Aspect,
+    /// how many times the console's resolution the GPU draws at, in
+    /// quarters from 1 to 3.5, from the next start.
+    pub resolution: f32,
     /// pictures a second the panel is filled up to with ones halfway
     /// between each two of the top screen's, 30 or 60, 0 for none.
     pub interpolate_to: u32,
@@ -109,6 +140,9 @@ pub struct Settings {
     /// or up and down.
     pub reverse_tilt_x: bool,
     pub reverse_tilt_y: bool,
+    /// buttons and sticks drawn over the screens, for a touch screen with
+    /// no gamepad.
+    pub touch_controls: bool,
 }
 
 impl Default for Settings {
@@ -118,6 +152,8 @@ impl Default for Settings {
             swapped: false,
             smooth: true,
             stretched: Stretch::Off,
+            aspect: Aspect::Original,
+            resolution: 1.0,
             interpolate_to: 0,
             show_fps: false,
             show_clock: true,
@@ -130,6 +166,7 @@ impl Default for Settings {
             dpad: Dpad::Dpad,
             reverse_tilt_x: false,
             reverse_tilt_y: false,
+            touch_controls: cfg!(target_os = "android"),
         }
     }
 }

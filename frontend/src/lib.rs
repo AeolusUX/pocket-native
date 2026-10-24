@@ -25,6 +25,7 @@ mod profiler;
 mod readahead;
 mod settings;
 mod sound;
+mod touch;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -139,6 +140,8 @@ pub fn run(mut args: Vec<String>) {
         data_dir: Some(data.clone()),
         language: game.language,
         region: game.region,
+        // ZAKURO_RESOLUTION=2.5 over the menu's, for trying one
+        resolution: std::env::var("ZAKURO_RESOLUTION").ok().and_then(|v| v.parse().ok()).unwrap_or(settings.resolution),
         // ZAKURO_CLOCK=milliseconds since 1900 starts the clock there, as boot
         // takes it, so that a scripted run meets the same encounters
         clock: std::env::var("ZAKURO_CLOCK").ok().and_then(|v| v.parse().ok()),
@@ -182,7 +185,9 @@ pub fn run(mut args: Vec<String>) {
     let font = Font::load();
     let mut menu = Menu::default();
     let mut overlay: Option<Arc<Overlay>> = None;
-    let mut menu_drawn = false;
+    let mut controls = touch::Controls::load();
+    // whether the menu went up, and with which of the touch controls' overlays
+    let (mut menu_drawn, mut menu_controls) = (false, None);
     let (mut fps, mut last_fps, mut status, mut fps_since) = (0u32, 0u32, None, Instant::now());
     // what the screen says for a moment after a hotkey, and since when
     let mut note: Option<(&str, Instant)> = None;
@@ -243,17 +248,58 @@ pub fn run(mut args: Vec<String>) {
     let slow: Option<f64> = std::env::var("ZAKURO_SLOW_FRAMES").ok().and_then(|ms| ms.parse().ok());
     loop {
         let began = Instant::now();
-        let (mut keys, axes, screen_touch, second_touch) = {
-            let pad = pad.lock().unwrap();
-            (pad.keys.clone(), pad.axes, pad.touch, pad.second_touch)
+        let (mut keys, mut axes, fingers, second_touch, pad_used) = {
+            let mut pad = pad.lock().unwrap();
+            let keys: HashSet<u16> = pad.keys.union(&pad.let_go).copied().collect();
+            let fingers: Vec<(i32, f32, f32)> = pad.fingers.iter().chain(&pad.lifted).copied().collect();
+            pad.let_go.clear();
+            pad.lifted.clear();
+            (keys, pad.axes, fingers, pad.second_touch, pad.pad_used)
         };
         if input::QUIT.load(std::sync::atomic::Ordering::Relaxed) {
             log::info!("asked to quit");
             break;
         }
+        // away: nothing runs, the screens only go up now and then, which is
+        // when the renderer lets go of a window that went
+        if input::PAUSED.load(std::sync::atomic::Ordering::Relaxed) {
+            system.present_panel(layout::shown(&settings), None, Vec::new(), settings.smooth, false);
+            std::thread::sleep(frame);
+            next = Instant::now();
+            continue;
+        }
         if let Some((_, scripted)) = keys_script.iter().rev().find(|(from, _)| *from <= tick) {
             keys = scripted.clone();
         }
+        // the touch controls moved and sized with the game paused under them,
+        // until Done or FN
+        if controls.editing() {
+            let fn_pressed = keys.contains(&FN) && !held.contains(&FN);
+            if controls.edit(&font, zakuro_gpu::layout_size(), layout::shown(&settings), &fingers, fn_pressed) {
+                next = Instant::now();
+            } else {
+                let edited = controls.edit_overlay(&font);
+                system.present_panel(layout::shown(&settings), None, vec![edited], settings.smooth, false);
+            }
+            held = keys;
+            std::thread::sleep(frame);
+            continue;
+        }
+        // the touch controls hold keys and the circle pad as the gamepad
+        // would, and the fingers on none of them touch the screens
+        let on_screen = (settings.touch_controls && !pad_used).then(|| controls.hold(&font, zakuro_gpu::layout_size(), layout::shown(&settings), &fingers));
+        let screen_touch = match &on_screen {
+            Some(held) => {
+                keys.extend(&held.keys);
+                if let Some((across, down)) = held.stick {
+                    axes[0] = (across * input::STICK) as i32;
+                    axes[1] = (down * input::STICK) as i32;
+                }
+                held.free.first().copied()
+            }
+            None => fingers.first().map(|&(_, x, y)| (x, y)),
+        };
+        let controls_overlay = on_screen.as_ref().map(|held| controls.overlay(&font, held));
         tick += 1;
         let pressed = |key: u16| keys.contains(&key) && !held.contains(&key);
         let [fn_pressed, start, select, l1, l2, r1] = [FN, START, SELECT, L1, L2, R1].map(pressed);
@@ -299,15 +345,24 @@ pub fn run(mut args: Vec<String>) {
                     exit_code = RESET;
                     break;
                 }
+                Action::EditControls => {
+                    settings::save(&settings_path, &settings);
+                    (overlay, status) = (None, None);
+                    controls.start_editing();
+                    continue;
+                }
                 Action::Quit => break,
             }
             if menu.open {
-                if !menu_drawn {
-                    let mut canvas = Canvas::new(&font, PANEL);
-                    menu.draw(&mut canvas, &settings, &game, &profile, &title);
-                    overlay = Some(Arc::new(canvas.finish()));
-                    system.present_panel(layout::shown(&settings), None, overlay.clone(), settings.smooth, false);
-                    menu_drawn = true;
+                let drawn_controls = controls_overlay.as_ref().map(|overlay| Arc::as_ptr(overlay) as usize);
+                if !menu_drawn || drawn_controls != menu_controls {
+                    if !menu_drawn {
+                        let mut canvas = Canvas::new(&font, PANEL);
+                        menu.draw(&mut canvas, &settings, &game, &profile, &title);
+                        overlay = Some(Arc::new(canvas.finish()));
+                    }
+                    system.present_panel(layout::shown(&settings), None, overlays(&overlay, &controls_overlay), settings.smooth, false);
+                    (menu_drawn, menu_controls) = (true, drawn_controls);
                 }
                 std::thread::sleep(frame);
                 continue;
@@ -483,7 +538,7 @@ pub fn run(mut args: Vec<String>) {
             }
             let areas = layout::shown(&settings);
             let pointer = areas[1].map(|[x, y, width, height]| (x + (cursor.0 * width as f32 / 320.0) as i32, y + (cursor.1 * height as f32 / 240.0) as i32));
-            system.present_panel(areas, pointer, overlay.clone(), settings.smooth, interpolating);
+            system.present_panel(areas, pointer, overlays(&overlay, &controls_overlay), settings.smooth, interpolating);
         }
 
         if let Some(limit) = slow {
@@ -530,5 +585,18 @@ pub fn run(mut args: Vec<String>) {
     }
     settings::save(&settings_path, &settings);
     settings::save(&game_path, &game);
+    if let Some(before) = BEFORE_EXIT.get() {
+        before(exit_code);
+    }
     std::process::exit(exit_code);
 }
+
+/// the overlays drawn over the screens, the menu or the status line, then
+/// the touch controls.
+fn overlays(overlay: &Option<Arc<Overlay>>, controls: &Option<Arc<Overlay>>) -> Vec<Arc<Overlay>> {
+    overlay.iter().chain(controls).cloned().collect()
+}
+
+/// what a program around the frontend does with the exit code as a game
+/// ends, before the process does: an Android activity finishes with it.
+pub static BEFORE_EXIT: std::sync::OnceLock<fn(i32)> = std::sync::OnceLock::new();
