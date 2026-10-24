@@ -569,19 +569,16 @@ impl Status {
     }
 }
 
-/// the battery's percentage: from sysfs, or, where that file is not there
-/// (Knulli names its supply another way), from knulli-battery-check, whose
-/// report has a "Capacity: 83%" line.
+/// the battery's percentage, from whichever power supply is the battery:
+/// battery on the R36S, named another way on others, Knulli's among them.
 fn battery() -> Option<i64> {
-    // any failure here, a missing file, an unreadable one or one that is not
-    // a number, goes on to the script
-    if let Some(percent) = std::fs::read_to_string("/sys/class/power_supply/battery/capacity").ok().and_then(|text| text.trim().parse().ok()) {
-        return Some(percent);
-    }
-    let output = std::process::Command::new("knulli-battery-check").arg("report").output().ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("Capacity:")?.trim().trim_end_matches('%').parse().ok())
+    static CAPACITY: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let capacity = CAPACITY.get_or_init(|| {
+        let supplies = std::fs::read_dir("/sys/class/power_supply").ok()?;
+        let battery = supplies.flatten().map(|supply| supply.path()).find(|supply| std::fs::read_to_string(supply.join("type")).is_ok_and(|kind| kind.trim() == "Battery"))?;
+        Some(battery.join("capacity"))
+    });
+    std::fs::read_to_string(capacity.as_ref()?).ok()?.trim().parse().ok()
 }
 
 fn clock() -> String {
