@@ -9,6 +9,7 @@ members = [
     "recompiler",
     "recompiler/abi",
     "frontend",
+    "android",
 ]
 
 [workspace.package]

@@ -64,7 +64,6 @@ pub static QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 /// the pad for the program around the frontend to fill, the same one each
 /// call, which the frontend then reads in place of evdev.
-#[allow(dead_code)]
 pub fn share() -> Arc<Mutex<Pad>> {
     SHARED.get_or_init(Default::default).clone()
 }

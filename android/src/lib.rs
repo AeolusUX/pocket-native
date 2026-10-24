@@ -1,21 +1,21 @@
-//! Pocket Native as an Android app: a NativeActivity whose window the
-//! screens go to, whose key and motion events become the pad's buttons,
-//! sticks and touch, and whose files directory holds the game.
+//! Pocket Native's game on Android: the NativeActivity the launcher starts
+//! in a process of its own for one game, whose window the screens go to and
+//! whose key and motion events become the pad's buttons, sticks and touch.
+//! Quitting ends the process, which leaves the launcher showing again.
 //!
-//! The app's files directory, /sdcard/Android/data/<package>/files, holds
-//! sysdata/shared_font.bin and titles/, which the build's install script
-//! pushes there; the frontend keeps data/ (saves, log) and config/ beside
-//! them. game.3ds goes in the app's own folder on the SD card,
-//! /storage/<card>/Android/data/<package>/files, which the app reads with no
-//! permission, or beside the rest where there is no card. The title's recompiled code comes in the APK as
-//! libtitle.so, loaded by name from the app's own libraries.
+//! The launcher names the game's folder in the intent's "game" extra: its
+//! game.3ds, sysdata/ and data/ (saves, the log), in the app's folder on
+//! shared storage. The game's code is code/<title id>.so in the app's own
+//! storage, the one place Android loads code from, and the profiles,
+//! settings and the shader cache are beside it.
 //!
 //! On a handheld with a second display, the RG DS's bottom panel, one of
 //! the screens goes there by itself: SecondScreen.java shows a Presentation
-//! on it, whose surface and touches come back here through JNI. A file named
-//! one-screen in the files directory keeps both screens on the first display.
-//! Under GammaOS's DualStack the window is both panels stacked, and the
-//! screens go on its halves, with no Presentation.
+//! on it, whose surface and touches come back here through JNI. Under
+//! GammaOS's DualStack the window is both panels stacked, and the screens go
+//! on its halves, with no Presentation.
+
+#![cfg(target_os = "android")]
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ use jni::objects::{JClass, JObject, JValue};
 use jni::sys::{jboolean, jfloat, jint, JNI_TRUE};
 use jni::{JNIEnv, JavaVM, NativeMethod};
 
-use crate::input::{self, Pad, A, B, DOWN, FN, L1, L2, L3, LEFT, R1, R2, R3, RIGHT, SELECT, START, UP, X, Y};
+use pocket_native::input::{self, Pad, A, B, DOWN, FN, L1, L2, L3, LEFT, R1, R2, R3, RIGHT, SELECT, START, UP, X, Y};
 
 /// how far the frontend's sticks go, as input::stick takes them.
 const STICK: f32 = 1800.0;
@@ -38,11 +38,16 @@ const TOUCHSCREEN: u32 = 0x0000_1002;
 
 #[no_mangle]
 fn android_main(app: AndroidApp) {
-    let files = app.external_data_path().or_else(|| app.internal_data_path()).unwrap_or_else(|| PathBuf::from("/data/local/tmp/pocket-native"));
-    let data = files.join("data");
+    let own = app.internal_data_path().unwrap_or_else(|| PathBuf::from("/data/local/tmp/pocket-native"));
+    let folder = match game_extra(&app) {
+        Ok(Some(folder)) => PathBuf::from(folder),
+        // started without a game, from a shortcut to this activity
+        _ => std::process::exit(2),
+    };
+    let data = folder.join("data");
     let _ = std::fs::create_dir_all(&data);
-    let _ = std::fs::create_dir_all(files.join("config"));
-    set_up(&files, &data);
+    let _ = std::fs::create_dir_all(own.join("config"));
+    set_up(&own, &folder, &data);
     std::panic::set_hook(Box::new(|info| {
         log::error!("{info}");
         let _ = std::fs::write("data/panic.txt", info.to_string());
@@ -72,15 +77,15 @@ fn android_main(app: AndroidApp) {
     let pad = input::share();
     if stacked {
         log::info!("a {window_width}x{window_height} window, both panels stacked by GammaOS's DualStack");
-    } else if !files.join("one-screen").exists() {
+    } else if !own.join("config").join("one-screen").exists() {
         match show_second_screen(&app) {
             Ok(true) => log::info!("asked for the second screen"),
             Ok(false) => log::info!("no second display, both screens on this one"),
             Err(error) => log::warn!("could not show the second screen, {error}"),
         }
     }
-    let rom = find_game(&app, &files).to_string_lossy().into_owned();
-    let game = std::thread::Builder::new().name("game".into()).spawn(move || crate::run(vec![rom])).expect("a thread for the game");
+    let rom = folder.join("game.3ds").to_string_lossy().into_owned();
+    let game = std::thread::Builder::new().name("game".into()).spawn(move || pocket_native::run(vec![rom])).expect("a thread for the game");
 
     loop {
         app.poll_events(Some(Duration::from_millis(8)), |event| {
@@ -101,16 +106,17 @@ fn android_main(app: AndroidApp) {
 }
 
 /// the frontend's places and switches, as run.sh gives them on ArkOS.
-fn set_up(files: &Path, data: &Path) {
-    let _ = std::env::set_current_dir(files);
+fn set_up(own: &Path, folder: &Path, data: &Path) {
+    let _ = std::env::set_current_dir(folder);
     std::env::set_var("POCKET_NATIVE_LOG", data.join("log.txt"));
     std::env::set_var("ZAKURO_FAST", "1");
     std::env::set_var("ZAKURO_DATA", data);
-    // by name, the app's own libraries are where the system looks first
-    std::env::set_var("ZAKURO_RECOMPILED", "libtitle.so");
+    if let Some(id) = folder.file_name() {
+        std::env::set_var("ZAKURO_RECOMPILED", own.join("code").join(id).with_extension("so"));
+    }
     std::env::set_var("ZAKURO_SHADER_MANIFEST", data.join("shaders.txt"));
-    std::env::set_var("POCKET_NATIVE_TITLES", files.join("titles"));
-    std::env::set_var("POCKET_NATIVE_CONFIG", files.join("config"));
+    std::env::set_var("POCKET_NATIVE_TITLES", own.join("titles"));
+    std::env::set_var("POCKET_NATIVE_CONFIG", own.join("config"));
     let drops = data.join("drops.txt");
     if let Ok(rules) = std::fs::read_to_string(drops) {
         std::env::set_var("ZAKURO_DROP_DRAWS", rules.trim());
@@ -122,7 +128,7 @@ fn set_up(files: &Path, data: &Path) {
     // compiled for the next run. an app has no HOME, without this every run
     // compiled every shader again, the driver's compiler busy for minutes
     // and new effects late to show up
-    std::env::set_var("XDG_CACHE_HOME", files.join("cache"));
+    std::env::set_var("XDG_CACHE_HOME", own.join("cache"));
     // data/env.txt, NAME=value a line, sets the switches a shell would, for
     // trying one without a new build: ZAKURO_HOST_PROFILE=1800,600 and the like
     let env = data.join("env.txt");
@@ -131,7 +137,7 @@ fn set_up(files: &Path, data: &Path) {
         // one adb wrote as root with no read for others, which the app may
         // not open: the log says so rather than nothing
         if env.exists() {
-            let _ = SWITCHES.set(vec![format!("none, it could not be read ({error}); adb shell chmod 666 it")]);
+            std::env::set_var("POCKET_NATIVE_NOTE", format!("switches from data/env.txt: none, it could not be read ({error}); adb shell chmod 666 it"));
         }
     }
     if let Ok(text) = read {
@@ -142,17 +148,7 @@ fn set_up(files: &Path, data: &Path) {
                 taken.push(format!("{}={}", name.trim(), value.trim()));
             }
         }
-        let _ = SWITCHES.set(taken);
-    }
-}
-
-/// what data/env.txt set, for the log once there is one.
-static SWITCHES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-
-/// logs what data/env.txt set, so that a log says whether it was there.
-pub fn log_switches() {
-    if let Some(switches) = SWITCHES.get() {
-        log::info!("switches from data/env.txt: {}", switches.join(", "));
+        std::env::set_var("POCKET_NATIVE_NOTE", format!("switches from data/env.txt: {}", taken.join(", ")));
     }
 }
 
@@ -271,63 +267,25 @@ fn to_layout(x: f32, y: f32, (width, height): (i32, i32)) -> (f32, f32) {
 /// the second display's window, acquired from its surface, null for none.
 static SECOND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
-/// the game: game.3ds in the app's own folder on a removable card, where
-/// install.sh puts it when there is one, or else beside the app's files.
-fn find_game(app: &AndroidApp, files: &Path) -> PathBuf {
-    let mut places = match external_dirs(app) {
-        Ok(dirs) => dirs,
-        Err(error) => {
-            log::warn!("could not ask for the app's folders on the cards, {error}");
-            Vec::new()
-        }
-    };
-    // the first is the built-in storage's, the rest are cards'
-    if !places.is_empty() {
-        let builtin = places.remove(0);
-        places.push(builtin);
-    }
-    places.push(files.to_path_buf());
-    let found = places.iter().map(|dir| dir.join("game.3ds")).find(|path| path.is_file());
-    match found {
-        Some(path) => {
-            log::info!("the game is {}", path.display());
-            path
-        }
-        None => {
-            log::error!("no game.3ds in any of {places:?}, scripts/android/install.sh puts it there");
-            files.join("game.3ds")
-        }
-    }
-}
-
-/// the app's own files folder on each storage volume, the built-in one
-/// first, which asking for them also makes on a card that lacks it.
-fn external_dirs(app: &AndroidApp) -> Result<Vec<PathBuf>, String> {
+/// the intent's "game" extra, the folder of the game to play.
+fn game_extra(app: &AndroidApp) -> Result<Option<String>, String> {
     // SAFETY: the activity's VM and activity, which live as long as the app
     let (vm, activity) = unsafe { (JavaVM::from_raw(app.vm_as_ptr().cast()).map_err(|e| e.to_string())?, JObject::from_raw(app.activity_as_ptr().cast())) };
     let mut env = vm.attach_current_thread_permanently().map_err(|e| e.to_string())?;
-    let dirs = (|| -> jni::errors::Result<Vec<PathBuf>> {
-        let array: jni::objects::JObjectArray = env
-            .call_method(&activity, "getExternalFilesDirs", "(Ljava/lang/String;)[Ljava/io/File;", &[JValue::Object(&JObject::null())])?
-            .l()?
-            .into();
-        let mut dirs = Vec::new();
-        for index in 0..env.get_array_length(&array)? {
-            let dir = env.get_object_array_element(&array, index)?;
-            // null for a volume that is not mounted
-            if dir.is_null() {
-                continue;
-            }
-            let path: jni::objects::JString = env.call_method(&dir, "getAbsolutePath", "()Ljava/lang/String;", &[])?.l()?.into();
-            dirs.push(PathBuf::from(String::from(env.get_string(&path)?)));
+    let extra = (|| -> jni::errors::Result<Option<String>> {
+        let intent = env.call_method(&activity, "getIntent", "()Landroid/content/Intent;", &[])?.l()?;
+        let key = env.new_string("game")?;
+        let value = env.call_method(&intent, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;", &[JValue::Object(&key)])?.l()?;
+        if value.is_null() {
+            return Ok(None);
         }
-        Ok(dirs)
+        Ok(Some(env.get_string(&value.into())?.into()))
     })();
     if env.exception_check().unwrap_or(false) {
         let _ = env.exception_describe();
         let _ = env.exception_clear();
     }
-    dirs.map_err(|e| e.to_string())
+    extra.map_err(|e| e.to_string())
 }
 
 /// registers SecondScreen's native methods and has it show the second

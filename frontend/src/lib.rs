@@ -14,11 +14,9 @@
 //! pocket-native --probe <rom> [frames] tries a game as fast as it runs and
 //! writes a report of how it went, see probe.rs.
 
-#[cfg(target_os = "android")]
-mod android;
 mod busy;
 mod font;
-mod input;
+pub mod input;
 mod layout;
 mod menu;
 mod probe;
@@ -107,8 +105,10 @@ pub fn run(mut args: Vec<String>) {
             logger.target(env_logger::Target::Pipe(Box::new(file)));
         }
         logger.init();
-        #[cfg(target_os = "android")]
-        android::log_switches();
+        // a note from a program around the frontend, which has no log of its own
+        if let Ok(note) = std::env::var("POCKET_NATIVE_NOTE") {
+            log::info!("{note}");
+        }
     }
     let Some(path) = args.first().cloned() else {
         eprintln!("usage: pocket-native <rom>, or pocket-native --probe <rom> [frames]");
