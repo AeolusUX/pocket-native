@@ -539,17 +539,20 @@ float scale_factor(uint raw) {
     return s == 1u ? 2.0 : s == 2u ? 4.0 : 1.0;
 }
 
+// never, always, equal, not equal, less, less or equal, greater, greater or
+// equal. not a switch: Adreno's compiler fails to link one that folds to a
+// constant function with a discard after it
 bool compare(uint function, float value, float reference) {
-    switch (function) {
-        case 0u: return false;
-        case 1u: return true;
-        case 2u: return value == reference;
-        case 3u: return value != reference;
-        case 4u: return value < reference;
-        case 5u: return value <= reference;
-        case 6u: return value > reference;
-        default: return value >= reference;
+    if (function < 2u) {
+        return function == 1u;
     }
+    if (function < 4u) {
+        return (value == reference) == (function == 2u);
+    }
+    if (function < 6u) {
+        return value < reference || (function == 5u && value == reference);
+    }
+    return value > reference || (function == 7u && value == reference);
 }
 
 // a source's value for a combiner stage
