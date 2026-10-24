@@ -149,14 +149,30 @@ pub struct Menu {
     held: u32,
 }
 
+/// whether a field does anything on this handheld: touch controls where a
+/// program around the frontend gives touches, an Android app's; filling the
+/// displays with a screen on each; turning a panel the frontend drives
+/// itself, which an Android window does on its own; and power where the
+/// launcher gives a program for it.
+fn useful(field: Field) -> bool {
+    match field {
+        Field::TouchControls | Field::EditControls => crate::input::shared().is_some(),
+        Field::Stretch => zakuro_gpu::second_window() || zakuro_gpu::stacked(),
+        Field::Rotation => crate::input::shared().is_none(),
+        Field::Power => std::env::var_os("POCKET_NATIVE_POWER").is_some(),
+        _ => true,
+    }
+}
+
 fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
     let toggles = |range: std::ops::RangeInclusive<usize>| range.map(Field::Toggle).collect();
+    let only = |fields: Vec<Field>| fields.into_iter().filter(|&field| useful(field)).collect();
     match page {
         Page::Main => vec![
-            ("Display", vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::Rotation]),
-            ("Performance", vec![Field::FrameCap, Field::Power]),
+            ("Display", only(vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::Rotation])),
+            ("Performance", only(vec![Field::FrameCap, Field::Power])),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
-            ("Controls", vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::Dpad, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls]),
+            ("Controls", only(vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::Dpad, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
         ],
         Page::Advanced => vec![
