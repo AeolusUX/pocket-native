@@ -13,6 +13,9 @@ for profile in titles/*/profile.toml; do
     mkdir -p "/work/assets/$(dirname "$profile")"
     cp "$profile" "/work/assets/$profile"
 done
+# the licenses, as the kit puts them beside the program
+python3 tools/third_party.py /work/assets/THIRD_PARTY_LICENSES.txt pocket-native-android aarch64-linux-android >/dev/null
+cp LICENSE CREDITS.md assets/fonts/OFL.txt /work/assets/
 label="Pocket Native"
 [ "$package" = io.github.pocketnative ] || label="Pocket Native (test)"
 bash scripts/android/make_apk.sh "$package" "$label" /work/libpocketnative.so /work/assets "$out" "$keystore"
