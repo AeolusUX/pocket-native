@@ -28,6 +28,32 @@ use crate::{GpuMemory, Picture, ScreenRef};
 
 const FRAGMENT_SOURCE: &str = include_str!("../../shaders/raster.frag");
 
+/// the alpha test's compare as raster.frag has it, and as Adreno's compiler
+/// takes it: it fails to link the switch where it folds to a constant
+/// function with a discard after it. Only Adreno gets the second, so other
+/// GPUs keep the programs they have cached.
+const SWITCH_COMPARE: &str = "    switch (function) {
+        case 0u: return false;
+        case 1u: return true;
+        case 2u: return value == reference;
+        case 3u: return value != reference;
+        case 4u: return value < reference;
+        case 5u: return value <= reference;
+        case 6u: return value > reference;
+        default: return value >= reference;
+    }";
+const ADRENO_COMPARE: &str = "    if (function < 2u) {
+        return function == 1u;
+    }
+    if (function < 4u) {
+        return (value == reference) == (function == 2u);
+    }
+    if (function < 6u) {
+        return value < reference || (function == 5u && value == reference);
+    }
+    return value > reference || (function == 7u && value == reference);";
+static ADRENO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 const VERTEX_SOURCE: &str = r#"#version 310 es
 layout(location = 0) in vec4 position;
 layout(location = 1) in vec4 color;
@@ -880,6 +906,9 @@ fn fragment_source(constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, li
         ] {
             out = out.replace(from, to);
         }
+    }
+    if ADRENO.load(std::sync::atomic::Ordering::Relaxed) {
+        out = out.replace(SWITCH_COMPARE, ADRENO_COMPARE);
     }
     out
 }
@@ -3557,6 +3586,7 @@ impl Gles {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::DITHER);
             log::info!("drawing with OpenGL ES on {name}");
+            ADRENO.store(name.contains("Adreno"), std::sync::atomic::Ordering::Relaxed);
             if gl.supported_extensions().contains("GL_OES_compressed_ETC1_RGB8_texture") && !crate::switch("ZAKURO_NO_ETC1", "ETC1 textures decoded") {
                 crate::raster::SAMPLES_ETC1.store(true, std::sync::atomic::Ordering::Relaxed);
                 log::info!("ETC1 textures stay compressed");
