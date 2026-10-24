@@ -2382,18 +2382,41 @@ struct Ring {
     offset: usize,
     align: usize,
     laps: u64,
+    /// the whole buffer mapped for good, where the driver has buffer
+    /// storage, written with no call into GL, and a fence after each
+    /// quarter, waited on before that quarter is written again: Adreno's
+    /// driver waits for the GPU on every map or update of a buffer in use
+    mapped: Option<(*mut u8, [Option<glow::Fence>; 4])>,
+}
+
+/// whether rings are mapped for good: on Android, or with
+/// ZAKURO_PERSISTENT, where the driver has buffer storage.
+fn persistent(gl: &glow::Context) -> bool {
+    static PERSISTENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PERSISTENT.get_or_init(|| {
+        (cfg!(target_os = "android") || std::env::var_os("ZAKURO_PERSISTENT").is_some()) && gl.supported_extensions().contains("GL_EXT_buffer_storage")
+    })
 }
 
 impl Ring {
     fn new(gl: &glow::Context, target: u32, size: usize, align: usize) -> Result<Ring, String> {
-        // SAFETY: the context is current
-        let buffer = unsafe {
+        // SAFETY: the context is current, and the mapping lasts as long as
+        // the buffer, which a ring keeps
+        unsafe {
             let buffer = gl.create_buffer()?;
             gl.bind_buffer(target, Some(buffer));
+            if persistent(gl) {
+                let flags = glow::MAP_WRITE_BIT | glow::MAP_PERSISTENT_BIT | glow::MAP_COHERENT_BIT;
+                gl.buffer_storage(target, size as i32, None, flags);
+                let base = gl.map_buffer_range(target, 0, size as i32, flags);
+                if base.is_null() {
+                    return Err("could not map a buffer for good".into());
+                }
+                return Ok(Ring { buffer, size, offset: 0, align, laps: 0, mapped: Some((base, Default::default())) });
+            }
             gl.buffer_data_size(target, size as i32, glow::STREAM_DRAW);
-            buffer
-        };
-        Ok(Ring { buffer, size, offset: 0, align, laps: 0 })
+            Ok(Ring { buffer, size, offset: 0, align, laps: 0, mapped: None })
+        }
     }
 
     fn push(&mut self, gl: &glow::Context, target: u32, bytes: &[u8]) -> Result<usize, String> {
@@ -2403,6 +2426,39 @@ impl Ring {
     fn push_aligned(&mut self, gl: &glow::Context, target: u32, bytes: &[u8], align: usize) -> Result<usize, String> {
         let _timed = timed(17);
         let mut at = self.offset.div_ceil(align) * align;
+        if let Some((base, fences)) = &mut self.mapped {
+            let quarter = self.size / 4;
+            if bytes.is_empty() || bytes.len() > quarter {
+                return Err(format!("{} bytes for a ring of {}", bytes.len(), self.size));
+            }
+            // each push inside one quarter, the next one over when it would
+            // run across, so that a quarter's fence follows every draw of it
+            if at / quarter != (at + bytes.len() - 1) / quarter {
+                at = (at / quarter + 1) * quarter;
+            }
+            if at + bytes.len() > self.size {
+                at = 0;
+                self.laps += 1;
+            }
+            let (open, next) = (self.offset.saturating_sub(1) / quarter, at / quarter);
+            // SAFETY: the context is current, the quarter written is one the
+            // GPU is done with, and the range lies inside the mapping
+            unsafe {
+                if next != open {
+                    if let Some(old) = fences[open].replace(gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0)?) {
+                        gl.delete_sync(old);
+                    }
+                    if let Some(fence) = fences[next].take() {
+                        while gl.client_wait_sync(fence, glow::SYNC_FLUSH_COMMANDS_BIT, 100_000_000) == glow::TIMEOUT_EXPIRED {}
+                        gl.delete_sync(fence);
+                    }
+                }
+                gl.bind_buffer(target, Some(self.buffer));
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(at), bytes.len());
+            }
+            self.offset = at + bytes.len();
+            return Ok(at);
+        }
         // SAFETY: the context is current, the range mapped lies inside the
         // buffer and past everything a draw before it reads, or in storage
         // orphaned for it
