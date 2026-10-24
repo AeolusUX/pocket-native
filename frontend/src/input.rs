@@ -82,17 +82,20 @@ fn rk3562_pad(name: &str) -> bool {
 }
 
 pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
+    // muOS calls its pad muOS-Keys: on its release the kernel's, numbered as
+    // on the H700 handhelds, and from the next one a pad muOS makes itself,
+    // vendor 756d, with the usual gamepad numbers and the d-pad as a hat
+    let event = path.rsplit('/').next().unwrap_or_default();
+    let vendor = std::fs::read_to_string(format!("/sys/class/input/{event}/device/id/vendor")).unwrap_or_default();
+    let muos = name == "muOS-Keys" && vendor.trim() == "756d";
     // they come in as the R36S's
-    let h700 = h700_pad(&name);
+    let h700 = h700_pad(&name) || (name == "muOS-Keys" && !muos);
     // Anbernic's RK3566 handhelds (RG353, RG503) give select, start, the
     // sticks' buttons and the right stick the usual numbers
     let rk3566 = name.starts_with("retrogame_joypad");
     // the RK3562 handhelds give them the usual numbers too, with the
     // sticks on the usual axes
     let rk3562 = rk3562_pad(&name);
-    // muOS's own pad on the H700 handhelds, the usual gamepad numbers with
-    // the d-pad as a hat
-    let muos = name == "muOS-Keys";
     log::info!(
         "buttons from {name}{}",
         if h700 {
@@ -108,11 +111,12 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
         }
     );
     // the R36S's stick each of axes 0 to 5 is, scaled to its travel
-    let sticks = if h700 || muos {
-        Some([None, None, Some(0), Some(1), Some(3), Some(4)])
+    let sticks = if h700 {
+        // left stick on ABS_Y and ABS_Z, right on ABS_RY and ABS_RZ
+        Some([None, Some(0), Some(1), None, Some(3), Some(4)])
     } else if rk3566 {
         Some([Some(0), Some(1), Some(3), None, None, Some(4)])
-    } else if rk3562 {
+    } else if rk3562 || muos {
         // left stick on ABS_X and ABS_Y, right on ABS_RX and ABS_RY, the
         // triggers on ABS_Z and ABS_RZ, which are buttons here
         Some([Some(0), Some(1), None, Some(3), Some(4), None])
@@ -133,12 +137,14 @@ pub fn read_pad(path: String, name: String, pad: Arc<Mutex<Pad>>) {
             let mut pad = pad.lock().unwrap();
             match (kind, sticks) {
                 (1, _) => {
-                    let code = if h700 || muos {
+                    let code = if h700 {
                         h700_button(code)
                     } else if rk3566 {
                         rk3566_button(code)
                     } else if rk3562 {
                         rk3562_button(code)
+                    } else if muos {
+                        muos_button(code)
                     } else {
                         code
                     };
@@ -216,6 +222,22 @@ fn rk3562_button(code: u16) -> u16 {
         317 => L3,
         318 => R3,
         704 => FN,
+        other => other,
+    }
+}
+
+/// a button of muOS's pad as the R36S numbers it: A and B the other way
+/// round, select, start, home and the sticks' buttons the usual gamepad
+/// codes. X, Y, the shoulders and the triggers already have the R36S's.
+fn muos_button(code: u16) -> u16 {
+    match code {
+        304 => A,
+        305 => B,
+        314 => SELECT,
+        315 => START,
+        316 => FN,
+        317 => L3,
+        318 => R3,
         other => other,
     }
 }
