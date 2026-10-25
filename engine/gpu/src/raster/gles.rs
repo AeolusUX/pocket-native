@@ -146,6 +146,97 @@ void main() {
 }
 "#;
 
+/// a surface's pixels from another's drawn over the same memory in another
+/// format or layout, through the bytes memory would hold, as a write back
+/// and an upload would make them.
+const REINTERPRET_SOURCE: &str = r#"#version 310 es
+precision highp float;
+precision highp int;
+precision highp image2D;
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0, rgba8) uniform readonly image2D source;
+layout(binding = 1, rgba8) uniform writeonly image2D target;
+// width, height, bytes a pixel and format of each, whether each is tiled
+uniform ivec4 target_shape;
+uniform ivec4 source_shape;
+uniform ivec2 tiled;
+// the target's first row and how many
+uniform ivec2 rows;
+// how far into the source's memory the target starts
+uniform int delta;
+
+int place(int x, int y, int width, int bpp, int is_tiled) {
+    if (is_tiled == 0) {
+        return (y * width + x) * bpp;
+    }
+    int m = (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
+    return (((y >> 3) * (width >> 3) + (x >> 3)) * 64 + m) * bpp;
+}
+
+ivec2 pixel(int index, int width, int is_tiled) {
+    if (is_tiled == 0) {
+        return ivec2(index % width, index / width);
+    }
+    int m = index & 63;
+    int x = (m & 1) | ((m >> 1) & 2) | ((m >> 2) & 4);
+    int y = ((m >> 1) & 1) | ((m >> 2) & 2) | ((m >> 3) & 4);
+    int tile = index >> 6;
+    int across = width >> 3;
+    return ivec2(tile % across * 8 + x, tile / across * 8 + y);
+}
+
+uint encode(uvec4 c, int format) {
+    switch (format) {
+    case 0:
+        return c.a | (c.b << 8) | (c.g << 16) | (c.r << 24);
+    case 1:
+        return c.b | (c.g << 8) | (c.r << 16);
+    case 2:
+        return ((c.r >> 3) << 11) | ((c.g >> 2) << 5) | (c.b >> 3);
+    case 3:
+        return ((c.r >> 3) << 11) | ((c.g >> 3) << 6) | ((c.b >> 3) << 1) | (c.a >= 128u ? 1u : 0u);
+    default:
+        return ((c.r >> 4) << 12) | ((c.g >> 4) << 8) | ((c.b >> 4) << 4) | (c.a >> 4);
+    }
+}
+
+uint expand(uint value, uint bits) {
+    return (value << (8u - bits)) | (value >> (2u * bits - 8u));
+}
+
+uvec4 decode(uint v, int format) {
+    switch (format) {
+    case 0:
+        return uvec4(v >> 24, (v >> 16) & 255u, (v >> 8) & 255u, v & 255u);
+    case 1:
+        return uvec4((v >> 16) & 255u, (v >> 8) & 255u, v & 255u, 255u);
+    case 2:
+        return uvec4(expand(v >> 11, 5u), expand((v >> 5) & 63u, 6u), expand(v & 31u, 5u), 255u);
+    case 3:
+        return uvec4(expand(v >> 11, 5u), expand((v >> 6) & 31u, 5u), expand((v >> 1) & 31u, 5u), (v & 1u) != 0u ? 255u : 0u);
+    default:
+        return uvec4((v >> 12) * 17u, ((v >> 8) & 15u) * 17u, ((v >> 4) & 15u) * 17u, (v & 15u) * 17u);
+    }
+}
+
+void main() {
+    ivec2 at = ivec2(gl_GlobalInvocationID.xy);
+    if (at.x >= target_shape.x || at.y >= rows.y) {
+        return;
+    }
+    int y = rows.x + at.y;
+    int start = delta + place(at.x, y, target_shape.x, target_shape.z, tiled.x);
+    uint value = 0u;
+    for (int k = 0; k < target_shape.z; k++) {
+        int offset = start + k;
+        ivec2 p = pixel(offset / source_shape.z, source_shape.x, tiled.y);
+        uvec4 c = uvec4(round(imageLoad(source, ivec2(p.x, source_shape.y - 1 - p.y)) * 255.0));
+        value |= ((encode(c, source_shape.w) >> uint(8 * (offset % source_shape.z))) & 255u) << uint(8 * k);
+    }
+    imageStore(target, ivec2(at.x, target_shape.y - 1 - y), vec4(decode(value, target_shape.w)) / 255.0);
+}
+"#;
+
 const UPRIGHT_SOURCE: &str = r#"#version 310 es
 precision highp float;
 precision highp image2D;
@@ -3675,6 +3766,7 @@ pub struct Gles {
     samplers: rustc_hash::FxHashMap<(bool, Wrap, Wrap), glow::Sampler>,
     blank: glow::Texture,
     transfer: Option<glow::Program>,
+    reinterpreter: Option<glow::Program>,
     upright: Option<glow::Program>,
     packers: Option<(glow::Program, glow::Program, glow::VertexArray)>,
     copiers: Option<([glow::Program; 3], glow::VertexArray)>,
@@ -3776,6 +3868,7 @@ impl Gles {
                 samplers: Default::default(),
                 blank,
                 transfer: None,
+                reinterpreter: None,
                 upright: None,
                 packers: None,
                 copiers: None,
@@ -5203,6 +5296,9 @@ impl Gles {
     /// tiles of both line up.
     fn adopt(&mut self, index: usize, other: usize) -> Result<bool, String> {
         let (s, o) = (&self.surfaces[index], &self.surfaces[other]);
+        if matches!((s.kind, o.kind), (Kind::Color(_), Kind::Color(_))) && (s.kind != o.kind || s.tiled != o.tiled) && crate::fast_with(crate::speedup::TILES) {
+            return self.reinterpret(index, other);
+        }
         if s.kind != o.kind || !s.tiled || !o.tiled || !crate::fast_with(crate::speedup::TILES) || s.width % 8 != 0 || o.width % 8 != 0 || s.height % 8 != 0 || o.height % 8 != 0 {
             return Ok(false);
         }
@@ -5295,6 +5391,80 @@ impl Gles {
         s.dirty = Some(merged);
         s.picture = None;
         s.version = next_version();
+        Ok(true)
+    }
+
+    /// the rows another colour surface drew over this one's memory in
+    /// another format or layout, as Kingdom Hearts 3D draws the same 128 KiB
+    /// as RGBA4 and as RGBA8 in turn: its pixels go through memory's bytes
+    /// into this one's on the GPU rather than being read back. whole rows of
+    /// both, at the console's size.
+    fn reinterpret(&mut self, index: usize, other: usize) -> Result<bool, String> {
+        let (s, o) = (&self.surfaces[index], &self.surfaces[other]);
+        let Some((first, last)) = o.dirty else { return Ok(false) };
+        let unit = |x: &Surface| x.row_bytes() * if x.tiled { 8 } else { 1 };
+        let lo = (o.addr + first * o.row_bytes()).max(s.addr);
+        let hi = (o.addr + last * o.row_bytes()).min(s.addr + s.size());
+        if self.scaled() || lo >= hi || (lo - s.addr) % unit(s) != 0 || (hi - s.addr) % unit(s) != 0 || (lo - o.addr) % unit(o) != 0 || (hi - o.addr) % unit(o) != 0 {
+            return Ok(false);
+        }
+        let (from, to) = ((lo - s.addr) / s.row_bytes(), (hi - s.addr) / s.row_bytes());
+        let (gone_from, gone_to) = ((lo - o.addr) / o.row_bytes(), (hi - o.addr) / o.row_bytes());
+        let left = match (first < gone_from, gone_to < last) {
+            (true, true) => return Ok(false),
+            (true, false) => Some((first, gone_from)),
+            (false, true) => Some((gone_to, last)),
+            (false, false) => None,
+        };
+        let merged = match s.dirty {
+            None => (from, to),
+            Some((a, b)) if b >= from && to >= a => (a.min(from), b.max(to)),
+            Some(_) => return Ok(false),
+        };
+        let shape = |x: &Surface| {
+            let Kind::Color(format) = x.kind else { unreachable!() };
+            ([x.width as i32, x.height as i32, x.kind.bytes() as i32, format_index(format)], x.tiled as i32, x.texture)
+        };
+        let ((target_shape, target_tiled, target), (source_shape, source_tiled, source)) = (shape(s), shape(o));
+        let delta = (lo - o.addr) as i32 - (from * s.row_bytes()) as i32;
+        let program = match self.reinterpreter {
+            Some(program) => program,
+            None => {
+                let program = if self.worker.here() {
+                    self.compute(REINTERPRET_SOURCE)?
+                } else {
+                    let worker = self.worker.clone();
+                    worker.run(|| self.compute(REINTERPRET_SOURCE))?
+                };
+                self.reinterpreter = Some(program);
+                program
+            }
+        };
+        let gl = self.gl;
+        self.worker.post_keeping(move || {
+            flush_clears(Some(source));
+            flush_clears(Some(target));
+            disturb();
+            // SAFETY: on the GL thread, both textures have immutable rgba8
+            // storage and every pixel read and written lies inside them
+            unsafe {
+                gl.use_program(Some(program));
+                let location = |name: &str| gl.get_uniform_location(program, name);
+                gl.uniform_4_i32_slice(location("target_shape").as_ref(), &target_shape);
+                gl.uniform_4_i32_slice(location("source_shape").as_ref(), &source_shape);
+                gl.uniform_2_i32(location("tiled").as_ref(), target_tiled, source_tiled);
+                gl.uniform_2_i32(location("rows").as_ref(), from as i32, (to - from) as i32);
+                gl.uniform_1_i32(location("delta").as_ref(), delta);
+                gl.bind_image_texture(0, Some(source), 0, false, 0, glow::READ_ONLY, glow::RGBA8);
+                gl.bind_image_texture(1, Some(target), 0, false, 0, glow::WRITE_ONLY, glow::RGBA8);
+                gl.dispatch_compute((target_shape[0] as u32).div_ceil(8), (to - from).div_ceil(8), 1);
+                gl.memory_barrier(glow::ALL_BARRIER_BITS);
+            }
+        });
+        let o = &mut self.surfaces[other];
+        (o.dirty, o.checked, o.stale, o.shadow, o.picture) = (left, false, true, Vec::new(), None);
+        let s = &mut self.surfaces[index];
+        (s.dirty, s.picture, s.version) = (Some(merged), None, next_version());
         Ok(true)
     }
 
@@ -6651,6 +6821,69 @@ mod tests {
                     }
                     assert!(stored == expected, "{format:?}, tiled {tiled}, rows {rows:?}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_drawing_in_another_format_over_a_surface_goes_over_through_memory_s_bytes() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        // Kingdom Hearts 3D draws the same 128 KiB as 256x256 RGBA4 and as
+        // 128x256 RGBA8
+        let (addr, len) = (0x1000u32, 0x20000usize);
+        let mut memory = Flat(vec![0; 0x30000]);
+        let fill = |memory: &mut Flat, seed: usize| {
+            for (i, byte) in memory.0[addr as usize..addr as usize + len].iter_mut().enumerate() {
+                *byte = (i * seed + i / 7) as u8;
+            }
+        };
+        fill(&mut memory, 11);
+        let rgba4 = gles.surface_rows(&mut memory, addr, (256, 256), Kind::Color(ColorFormat::Rgba4), true, None).unwrap();
+        fill(&mut memory, 29);
+        let drawn = memory.0.clone();
+        let rgba8 = gles.surface_rows(&mut memory, addr, (128, 256), Kind::Color(ColorFormat::Rgba8), true, None).unwrap();
+        gles.surfaces[rgba8].drew((0, 256));
+        // memory no longer holds the drawing, only the GPU does
+        fill(&mut memory, 3);
+        assert!(gles.reinterpret(rgba4, rgba8).unwrap());
+        assert_eq!((gles.surfaces[rgba4].dirty, gles.surfaces[rgba8].dirty), (Some((0, 256)), None));
+        let framebuffer = gles.framebuffer(Some(rgba4), None).unwrap();
+        let (gl, worker) = (gles.gl, gles.worker.clone());
+        let read = worker.run(move || unsafe {
+            let mut data = vec![0u8; 256 * 256 * 4];
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+            gl.read_pixels(0, 0, 256, 256, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut data)));
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            data
+        });
+        for y in 0..256u32 {
+            for x in 0..256u32 {
+                let at = (addr + pixel_offset(true, x, y, 256, 2) as u32) as usize;
+                let o = (((255 - y) * 256 + x) * 4) as usize;
+                assert_eq!(read[o..o + 4], ColorFormat::Rgba4.decode(&drawn[at..at + 2]), "at ({x}, {y})");
+            }
+        }
+        // and back, the bytes the RGBA8 drawing had
+        assert!(gles.reinterpret(rgba8, rgba4).unwrap());
+        let framebuffer = gles.framebuffer(Some(rgba8), None).unwrap();
+        let read = worker.run(move || unsafe {
+            let mut data = vec![0u8; 128 * 256 * 4];
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+            gl.read_pixels(0, 0, 128, 256, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut data)));
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            data
+        });
+        for y in 0..256u32 {
+            for x in 0..128u32 {
+                let at = (addr + pixel_offset(true, x, y, 128, 4) as u32) as usize;
+                let o = (((255 - y) * 128 + x) * 4) as usize;
+                assert_eq!(read[o..o + 4], ColorFormat::Rgba8.decode(&drawn[at..at + 4]), "back at ({x}, {y})");
             }
         }
     }
