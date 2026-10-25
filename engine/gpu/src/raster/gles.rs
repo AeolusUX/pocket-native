@@ -24,7 +24,7 @@ use crate::proctex;
 mod between;
 use crate::registers::*;
 use crate::shader::glsl::{self, SEMANTICS};
-use crate::shader::INPUT_REGISTERS;
+use crate::shader::{ShaderUnit, DESCRIPTOR_SIZE, INPUT_REGISTERS, PROGRAM_SIZE};
 use crate::{GpuMemory, Picture, ScreenRef};
 
 const FRAGMENT_SOURCE: &str = include_str!("../../shaders/raster.frag");
@@ -671,29 +671,14 @@ fn report_times() {
     }
 }
 
-const MANIFEST_HEADER: &str = "zakuro-gles 4";
+const MANIFEST_HEADER: &str = "zakuro-gles 5";
 
-/// a manifest from before the texture configuration constant told which
-/// units never clamp to the border, with every unit it turns on so.
-fn upgrade_manifest(text: &str) -> String {
-    let mut out = format!("{MANIFEST_HEADER}\n");
-    for line in text.lines().skip(1) {
-        let mut fields: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
-        if let Some(config) = fields.get_mut(2 + 25) {
-            if let Ok(value) = u32::from_str_radix(config, 16) {
-                *config = format!("{:x}", value | (value & 7) << 20);
-            }
-        }
-        out += &fields.join(" ");
-        out.push('\n');
-    }
-    out
-}
-
-fn vertex_path(manifest: &std::path::Path, hash: u64) -> std::path::PathBuf {
+/// the vertex programs' words, kept by fingerprint, so a run translates
+/// them again with its own translator.
+fn vertex_path(manifest: &std::path::Path, fingerprint: u64) -> std::path::PathBuf {
     let mut dir = manifest.as_os_str().to_owned();
     dir.push(".vertex");
-    std::path::PathBuf::from(dir).join(format!("{hash:016x}.vert"))
+    std::path::PathBuf::from(dir).join(format!("{fingerprint:016x}.pica"))
 }
 
 fn manifest_path() -> Option<std::path::PathBuf> {
@@ -3760,6 +3745,8 @@ pub struct Gles {
     shades: bool,
     translated: rustc_hash::FxHashMap<(u64, u32, [u32; SEMANTICS]), Option<u64>>,
     vertex_sources: HashMap<u64, String>,
+    /// what each translation came from, for the manifest.
+    vertex_inputs: HashMap<u64, (u64, u32, [u32; SEMANTICS])>,
     shaded_array: glow::VertexArray,
     generic: bool,
     vertex_array: glow::VertexArray,
@@ -3865,6 +3852,7 @@ impl Gles {
                 shades,
                 translated: Default::default(),
                 vertex_sources: HashMap::new(),
+                vertex_inputs: HashMap::new(),
                 shaded_array,
                 generic: crate::switch("ZAKURO_GENERIC_SHADERS", "generic shaders"),
                 vertex_array,
@@ -3925,30 +3913,41 @@ impl Gles {
 
     fn preload(&mut self) {
         let Some(path) = manifest_path() else { return };
-        let Ok(mut text) = std::fs::read_to_string(&path) else { return };
-        if text.lines().next() == Some("zakuro-gles 3") {
-            text = upgrade_manifest(&text);
-            let _ = std::fs::write(&path, &text);
-        }
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
         if text.lines().next() != Some(MANIFEST_HEADER) {
             log::info!("{} is from another version, starting it over", path.display());
             let _ = std::fs::remove_file(&path);
+            let _ = vertex_path(&path, 0).parent().map(std::fs::remove_dir_all);
             return;
         }
         let started = std::time::Instant::now();
         self.preloading = true;
+        let mut units: HashMap<u64, Option<ShaderUnit>> = HashMap::new();
         let mut count = 0;
-        for line in text.lines() {
+        for line in text.lines().skip(1) {
             let mut fields = line.split_whitespace();
-            let Some(Ok(vertex)) = fields.next().map(|field| u64::from_str_radix(field, 16)) else { continue };
-            if vertex != 0 && !self.vertex_sources.contains_key(&vertex) {
-                match std::fs::read_to_string(vertex_path(&path, vertex)) {
-                    Ok(source) => {
-                        self.vertex_sources.insert(vertex, source);
-                    }
-                    Err(_) => continue,
+            let vertex = match fields.next() {
+                Some("0") => 0,
+                Some(field) => {
+                    let Ok(parts) = field.split(':').map(|part| u64::from_str_radix(part, 16)).collect::<Result<Vec<u64>, _>>() else { continue };
+                    let Some((&[fingerprint, entry], semantics)) = parts.split_first_chunk::<2>() else { continue };
+                    let Ok(semantics) = <[u32; SEMANTICS]>::try_from(semantics.iter().map(|&value| value as u32).collect::<Vec<u32>>()) else { continue };
+                    let unit = units.entry(fingerprint).or_insert_with(|| {
+                        let bytes = std::fs::read(vertex_path(&path, fingerprint)).ok().filter(|bytes| bytes.len() == (PROGRAM_SIZE + DESCRIPTOR_SIZE) * 4)?;
+                        let mut unit = ShaderUnit::new();
+                        for (word, chunk) in unit.program.iter_mut().chain(unit.descriptors.iter_mut()).zip(bytes.as_chunks::<4>().0) {
+                            *word = u32::from_le_bytes(*chunk);
+                        }
+                        unit.prepare();
+                        Some(unit)
+                    });
+                    let Some(unit) = unit else { continue };
+                    unit.entry_point = entry as u32;
+                    let Ok(hash) = self.vertex_stage(unit, semantics) else { continue };
+                    hash
                 }
-            }
+                None => continue,
+            };
             let mut words = fields.map(|word| u32::from_str_radix(word, 16));
             let Some(Ok(writes_depth)) = words.next() else { continue };
             let words: Vec<u32> = words.filter_map(Result::ok).collect();
@@ -5099,14 +5098,15 @@ impl Gles {
             return;
         }
         let Some(path) = manifest_path() else { return };
-        let words = std::iter::once(writes_depth as u32).chain(constants.iter().copied()).chain(lighting.iter().copied());
-        let line = std::iter::once(format!("{vertex:x}")).chain(words.map(|word| format!("{word:x}"))).collect::<Vec<_>>().join(" ");
-        if vertex != 0 {
-            let file = vertex_path(&path, vertex);
-            if let (false, Some(source)) = (file.exists(), self.vertex_sources.get(&vertex)) {
-                let _ = file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&file, source));
+        let vertex = match vertex {
+            0 => "0".to_owned(),
+            hash => {
+                let Some((fingerprint, entry, semantics)) = self.vertex_inputs.get(&hash) else { return };
+                [*fingerprint, *entry as u64].into_iter().chain(semantics.iter().map(|&value| value as u64)).map(|value| format!("{value:x}")).collect::<Vec<_>>().join(":")
             }
-        }
+        };
+        let words = std::iter::once(writes_depth as u32).chain(constants.iter().copied()).chain(lighting.iter().copied());
+        let line = std::iter::once(vertex).chain(words.map(|word| format!("{word:x}"))).collect::<Vec<_>>().join(" ");
         let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
             use std::io::Write;
             let new = !path.exists();
@@ -6222,7 +6222,7 @@ impl Gles {
         }
         self.current()?;
         let vertex = match draw.geometry {
-            Geometry::Shaded(shading) => self.vertex_stage(shading)?,
+            Geometry::Shaded(shading) => self.vertex_stage(shading.unit, shading.semantics)?,
             Geometry::Triangles(_) => 0,
         };
 
@@ -6530,9 +6530,8 @@ impl Gles {
         self.worker.flush();
     }
 
-    fn vertex_stage(&mut self, shading: &Shading) -> Result<u64, String> {
-        let unit = shading.unit;
-        let key = (unit.fingerprint(), unit.entry_point, shading.semantics);
+    fn vertex_stage(&mut self, unit: &ShaderUnit, semantics: [u32; SEMANTICS]) -> Result<u64, String> {
+        let key = (unit.fingerprint(), unit.entry_point, semantics);
         if let Some(found) = self.translated.get(&key) {
             return found.ok_or_else(|| "the vertex program stays on the CPU".to_owned());
         }
@@ -6548,6 +6547,14 @@ impl Gles {
             Ok(source) => {
                 let hash = fnv(&[&source]);
                 self.vertex_sources.insert(hash, source);
+                self.vertex_inputs.insert(hash, key);
+                if let (false, Some(path)) = (self.preloading, manifest_path()) {
+                    let file = vertex_path(&path, key.0);
+                    let bytes: Vec<u8> = unit.program.iter().chain(unit.descriptors.iter()).flat_map(|word| word.to_le_bytes()).collect();
+                    if std::fs::metadata(&file).map(|meta| meta.len()).ok() != Some(bytes.len() as u64) {
+                        let _ = file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&file, bytes));
+                    }
+                }
                 Some(hash)
             }
             Err(error) => {
