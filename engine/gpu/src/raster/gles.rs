@@ -270,6 +270,11 @@ const EQUATIONS: [u32; 5] = [glow::FUNC_ADD, glow::FUNC_SUBTRACT, glow::FUNC_REV
 
 const TEXTURE_KEEP_FLUSHES: u64 = 600;
 
+/// batches a surface nothing drew into or read stays for, and how often the
+/// ones past it are let go.
+const SURFACE_KEEP_FLUSHES: u64 = 600;
+const RETIRE_EVERY: u64 = 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Color(ColorFormat),
@@ -301,6 +306,8 @@ struct Surface {
     packed: Option<(glow::Texture, glow::Framebuffer)>,
     version: u64,
     stale: bool,
+    /// the batch it was last drawn into or read in.
+    used: u64,
 }
 
 static VERSIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3585,6 +3592,8 @@ pub struct Gles {
     /// again only when they change.
     over_drawing: rustc_hash::FxHashMap<DrawnTexture, Vec<u8>>,
     flushes: u64,
+    /// the batch surfaces left unused are next looked for.
+    retire_at: u64,
     /// display transfers so far, the clock occlusion culling keeps time by.
     pictures: u64,
     warned_logic_op: bool,
@@ -3681,6 +3690,7 @@ impl Gles {
                 copied: Default::default(),
                 over_drawing: Default::default(),
                 flushes: 0,
+                retire_at: RETIRE_EVERY,
                 pictures: 0,
                 warned_logic_op: false,
                 preloading: false,
@@ -3964,6 +3974,84 @@ impl Gles {
         Ok((copiers, (copy, framebuffer)))
     }
 
+    /// lets go of the surfaces nothing drew into or read for a while, what
+    /// they drew written back first, with their framebuffers and the copies
+    /// made from them. a title drawing into new places scene after scene
+    /// would fill a handheld's memory otherwise, Mario Kart 7 sixty-four at
+    /// a time. no surface index is held between draws, so they can move.
+    fn retire<M: GpuMemory>(&mut self, memory: &mut M) -> Result<(), String> {
+        self.retire_at = self.flushes + RETIRE_EVERY;
+        let flushes = self.flushes;
+        let old: Vec<usize> = (0..self.surfaces.len()).filter(|&i| flushes - self.surfaces[i].used > SURFACE_KEEP_FLUSHES).collect();
+        if old.is_empty() {
+            return Ok(());
+        }
+        let dirty = old.iter().copied().filter(|&i| self.surfaces[i].dirty.is_some()).collect();
+        self.write_back(memory, dirty)?;
+        let mut remap = vec![None; self.surfaces.len()];
+        let mut kept = 0;
+        for (i, slot) in remap.iter_mut().enumerate() {
+            if !old.contains(&i) {
+                *slot = Some(kept);
+                kept += 1;
+            }
+        }
+        let (mut textures, mut framebuffers) = (Vec::new(), Vec::new());
+        let mut ranges = Vec::new();
+        for &i in &old {
+            let s = &self.surfaces[i];
+            textures.push(s.texture);
+            for (texture, framebuffer) in [s.upright, s.packed].into_iter().flatten() {
+                textures.push(texture);
+                framebuffers.push(framebuffer);
+            }
+            ranges.push((s.addr, s.size()));
+        }
+        let made_from = |t: &DrawnTexture| {
+            let size = t.width * t.height * t.format.bytes_per_pixel() as u32;
+            ranges.iter().any(|&(addr, len)| t.addr < addr + len && addr < t.addr + size)
+        };
+        self.copies.retain(|t, &mut (texture, framebuffer)| {
+            let keep = !made_from(t);
+            if !keep {
+                textures.push(texture);
+                framebuffers.push(framebuffer);
+            }
+            keep
+        });
+        self.copied.retain(|t, _| !made_from(t));
+        self.over_drawing.retain(|t, _| !made_from(t));
+        for ((color, depth), framebuffer) in std::mem::take(&mut self.framebuffers) {
+            let (color, depth) = (color.map(|i| remap[i]), depth.map(|i| remap[i]));
+            match (color, depth) {
+                (Some(None), _) | (_, Some(None)) => framebuffers.push(framebuffer),
+                _ => {
+                    self.framebuffers.insert((color.flatten(), depth.flatten()), framebuffer);
+                }
+            }
+        }
+        let mut i = 0;
+        self.surfaces.retain(|_| {
+            i += 1;
+            remap[i - 1].is_some()
+        });
+        log::debug!("let go of {} surfaces nothing used for {SURFACE_KEEP_FLUSHES} batches, {} left", old.len(), self.surfaces.len());
+        let gl = self.gl;
+        self.worker.post_keeping(move || {
+            disturb();
+            // SAFETY: on the GL thread, after every draw that used them
+            unsafe {
+                for framebuffer in framebuffers {
+                    gl.delete_framebuffer(framebuffer);
+                }
+                for texture in textures {
+                    gl.delete_texture(texture);
+                }
+            }
+        });
+        Ok(())
+    }
+
     fn copy_texture<M: GpuMemory>(&mut self, memory: &mut M, texture: &DrawnTexture) -> Result<glow::Texture, String> {
         if self.texture_source(texture).is_none() {
             if let Some((source, lead)) = self.texture_over_drawing(texture) {
@@ -3971,6 +4059,7 @@ impl Gles {
             }
         }
         let (source, row) = self.texture_source(texture).ok_or("the buffer a texture was drawn into is gone")?;
+        self.surfaces[source].used = self.flushes;
         let (([color, depth, stencil], empty), (copy, framebuffer)) = self.copy_objects(texture)?;
         let surface = &self.surfaces[source];
         let stamp = (surface.texture, surface.version, row);
@@ -4045,6 +4134,7 @@ impl Gles {
     /// drawing: the drawing's rows drawn in on the GPU as copy_texture does,
     /// the rows before them uploaded from memory.
     fn copy_over_drawing<M: GpuMemory>(&mut self, memory: &mut M, texture: &DrawnTexture, source: usize, lead: u32) -> Result<glow::Texture, String> {
+        self.surfaces[source].used = self.flushes;
         let (([color, _, _], empty), (copy, framebuffer)) = self.copy_objects(texture)?;
         let (width, height) = (texture.width, texture.height);
         let bpp = texture.format.bytes_per_pixel();
@@ -4719,6 +4809,9 @@ impl Gles {
             .surfaces
             .iter()
             .position(|s| s.addr == addr && s.width == width && s.height == height && s.kind == kind && s.tiled == tiled);
+        if let Some(index) = found {
+            self.surfaces[index].used = self.flushes;
+        }
         if found.is_none_or(|index| !self.surfaces[index].checked) && !self.worker.here() {
             if let Some(index) = found {
                 let size = self.surfaces[index].size();
@@ -4778,6 +4871,7 @@ impl Gles {
                     packed: None,
                     version: next_version(),
                     stale: false,
+                    used: self.flushes,
                 });
                 self.surfaces.len() - 1
             }
@@ -5620,6 +5714,9 @@ impl Gles {
         if empty || right <= left || top <= bottom {
             return Ok(());
         }
+        if self.flushes >= self.retire_at {
+            self.retire(memory)?;
+        }
         self.current()?;
         let vertex = match draw.geometry {
             Geometry::Shaded(shading) => self.vertex_stage(shading)?,
@@ -5668,6 +5765,7 @@ impl Gles {
                 let image = match &texture.drawn {
                     Some(drawn) => match self.whole_surface(drawn).filter(|&index| index != color) {
                         Some(index) => {
+                            self.surfaces[index].used = self.flushes;
                             sources[unit] = Some(self.surfaces[index].texture);
                             self.surfaces[index].texture
                         }
