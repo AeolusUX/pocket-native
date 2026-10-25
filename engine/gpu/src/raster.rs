@@ -669,16 +669,35 @@ fn to_screen(vertex: Vertex, viewport: (f32, f32, f32, f32)) -> Option<Screen> {
     })
 }
 
-/// clips a triangle to the volume the PICA draws, w positive, and -w <= z <= 0.
+/// signed distances to the planes of the volume the PICA draws, w
+/// positive, and -w <= z <= 0, a vertex is inside when all are >= 0.
+const CLIP_PLANES: [fn(&Vertex) -> f32; 3] = [|v| v.clip[3] - 1e-5, |v| -v.clip[2], |v| v.clip[2] + v.clip[3]];
+
+/// whether a vertex is inside the volume the PICA draws.
+fn inside(vertex: &Vertex) -> bool {
+    CLIP_PLANES.iter().all(|plane| plane(vertex) >= 0.0)
+}
+
+/// a vertex with z on an end of the range the PICA draws when it misses
+/// one only by rounding. the PICA works positions out in 24-bit floats,
+/// which land on 0 and -w, singles can miss them by a little, and 2D drawn
+/// on the near or far plane, a title's video say, lost triangles to it.
+fn held_in_range(mut vertex: Vertex) -> Vertex {
+    let [_, _, z, w] = vertex.clip;
+    let z_over_w = z / w;
+    if z_over_w > 0.0 && z_over_w < 1e-8 {
+        vertex.clip[2] = 0.0;
+    } else if z_over_w < -1.0 && z_over_w > -1.00001 {
+        vertex.clip[2] = -w;
+    }
+    vertex
+}
+
+/// clips a triangle to the volume the PICA draws.
 fn clip_triangle(triangle: [Vertex; 3]) -> Vec<Vertex> {
-    const EPSILON: f32 = 1e-5;
-    // signed distances to each plane, a vertex is inside when all are >= 0.
-    let planes: [fn(&Vertex) -> f32; 3] = [
-        |v| v.clip[3] - EPSILON,
-        |v| -v.clip[2],
-        |v| v.clip[2] + v.clip[3],
-    ];
-    if triangle.iter().all(|v| planes.iter().all(|plane| plane(v) >= 0.0)) {
+    let triangle = triangle.map(held_in_range);
+    let planes = CLIP_PLANES;
+    if triangle.iter().all(inside) {
         return triangle.to_vec();
     }
 
