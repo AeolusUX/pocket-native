@@ -68,7 +68,7 @@ working or not.
 | Powkiddy RX6H | dArkOS for clones | Played by testers. No FN button: L3 does its job |
 | Anbernic H700 handhelds: RG35XX and RG40XX families, RG CubeXX | Knulli, muOS | Played by testers |
 | Anbernic RG353 and RG503 | ArkOS | Buttons mapped, no tester report yet |
-| Anbernic RG52 Mini | | Played by testers |
+| Anbernic RG52 Mini | dArkOS | Played by testers |
 | Anbernic RG351P | ArkOS | Buttons not found yet |
 | AYN Thor | Android | Works, both screens |
 | Anbernic RG DS | Android | Works, both screens |
