@@ -4720,11 +4720,9 @@ impl Gles {
         if let Some(&program) = self.programs.get(&key) {
             return Ok(Some(program));
         }
-        if !self.worker.here() {
-            let worker = self.worker.clone();
-            wait_from("program");
-            return worker.run(|| self.program(constants, writes_depth, lighting, vertex, wait));
-        }
+        // what the compiler finished, still compiles or could not, and what
+        // it is given, are seen to here, only a program built here and now
+        // waits on the GL thread
         self.take_compiled(false);
         if let Some(&program) = self.programs.get(&key) {
             return Ok(Some(program));
@@ -4767,6 +4765,11 @@ impl Gles {
                 }
                 return Ok(None);
             }
+        }
+        if !self.worker.here() {
+            let worker = self.worker.clone();
+            wait_from("program");
+            return worker.run(|| self.program(constants, writes_depth, lighting, vertex, wait));
         }
         disturb();
         let program = build_program(&self.gl, &compiled, &fragment, cached.as_deref())?;
