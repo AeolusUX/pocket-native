@@ -198,7 +198,7 @@ impl<'a> Translator<'a> {
 
         out.push_str("void main() {\n");
         for register in 0..16 {
-            let _ = writeln!(out, "    temp{register} = vec4(0.0);");
+            let _ = writeln!(out, "    temp{register} = vec4(0.0, 0.0, 0.0, 1.0);");
             let _ = writeln!(out, "    output{register} = vec4(0.0);");
         }
         out.push_str("    address = ivec3(0);\n");
