@@ -2835,6 +2835,7 @@ struct DrawJob {
     geometry: Submit,
     targets: [Option<glow::Texture>; 2],
     sources: [Option<glow::Texture>; 3],
+    tables: Option<(u64, Arc<[u8]>)>,
 }
 
 impl DrawJob {
@@ -2852,6 +2853,23 @@ impl DrawJob {
             flush_clears(Some(source));
         }
         local(|local| {
+            // the GL thread puts them past what the draws before still read,
+            // this draw and those after bind them there
+            if let Some((id, bytes)) = &self.tables {
+                match local.table_sets.get(id).filter(|(laps, _)| *laps == local.tables.laps) {
+                    Some(&(_, at)) => local.tables_at = Some(at),
+                    None => match local.tables.push(&gl, glow::SHADER_STORAGE_BUFFER, bytes) {
+                        Ok(at) => {
+                            local.tables_at = Some(at);
+                            if local.table_sets.len() > 1024 {
+                                local.table_sets.clear();
+                            }
+                            local.table_sets.insert(*id, (local.tables.laps, at));
+                        }
+                        Err(error) => log::error!("could not upload the lighting tables, {error}"),
+                    },
+                }
+            }
             // SAFETY: on the GL thread
             let query = match self.occlusion {
                 Some((key, picture)) => match unsafe { local.occlusion.check(&gl, key, picture) } {
@@ -3640,6 +3658,8 @@ pub struct Gles {
     generic: bool,
     vertex_array: glow::VertexArray,
     tables: Option<(u64, u64, u64)>,
+    /// tables changed since the last draw went, they go with the next.
+    tables_due: Option<(u64, Arc<[u8]>)>,
     table_hashes: [(u64, u64); 24],
     table_sets: rustc_hash::FxHashMap<[u64; 26], (u64, Arc<[u8]>)>,
     table_set_ids: u64,
@@ -3740,6 +3760,7 @@ impl Gles {
                 generic: crate::switch("ZAKURO_GENERIC_SHADERS", "generic shaders"),
                 vertex_array,
                 tables: None,
+                tables_due: None,
                 table_hashes: [(u64::MAX, 0); 24],
                 table_sets: Default::default(),
                 table_set_ids: 0,
@@ -5742,27 +5763,9 @@ impl Gles {
                 (self.table_set_ids, bytes)
             }
         };
-        // the GL thread puts them past what the draws before still read, the
-        // draws after bind them there
-        let gl = self.gl;
-        self.worker.post_keeping(move || {
-            local(|local| {
-                if let Some(&(_, at)) = local.table_sets.get(&id).filter(|(laps, _)| *laps == local.tables.laps) {
-                    local.tables_at = Some(at);
-                    return;
-                }
-                match local.tables.push(&gl, glow::SHADER_STORAGE_BUFFER, &bytes) {
-                    Ok(at) => {
-                        local.tables_at = Some(at);
-                        if local.table_sets.len() > 1024 {
-                            local.table_sets.clear();
-                        }
-                        local.table_sets.insert(id, (local.tables.laps, at));
-                    }
-                    Err(error) => log::error!("could not upload the lighting tables, {error}"),
-                }
-            })
-        });
+        // they go with the next draw rather than on their own, which would
+        // send the draws held so far off early
+        self.tables_due = Some((id, bytes));
     }
 
     fn triangles(triangles: &[[Screen; 3]], (width, height): (f32, f32), depth_map: DepthMap) -> Vec<u8> {
@@ -6084,6 +6087,7 @@ impl Gles {
             geometry,
             targets: [Some(self.surfaces[color].texture), depth.map(|depth| self.surfaces[depth].texture)],
             sources,
+            tables: self.tables_due.take(),
         };
         self.worker.post_draw(job, self.gl);
         Ok(())
