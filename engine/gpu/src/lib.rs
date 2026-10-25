@@ -1076,17 +1076,11 @@ impl Gpu {
                 let end = (index + extra).min(words.len());
                 let burst = &words[index..end];
                 if uniforms {
-                    for &value in burst {
-                        self.vertex_shader.upload_float_uniform(value);
-                    }
+                    self.vertex_shader.upload_float_uniforms(burst);
                 } else if program {
-                    let mirror = self.internal[REG_VS_COM_MODE] & 1 == 0;
-                    for &value in burst {
-                        self.vertex_shader.upload_program(value);
-                        if mirror {
-                            self.geometry_shader.upload_program(value);
-                        }
-                        renderer.upload_shader_code(value);
+                    self.vertex_shader.upload_programs(burst);
+                    if self.internal[REG_VS_COM_MODE] & 1 == 0 {
+                        self.geometry_shader.upload_programs(burst);
                     }
                 } else if table {
                     self.resources.light_tables.write(&mut self.internal, burst);
@@ -1478,13 +1472,6 @@ impl Gpu {
                 );
                 if program && self.internal[REG_VS_COM_MODE] & 1 == 0 {
                     configure_shader(&mut self.geometry_shader, offset, new);
-                }
-                match offset {
-                    SHADER_PROGRAM_DATA..=SHADER_PROGRAM_DATA_END => renderer.upload_shader_code(new),
-                    SHADER_DESCRIPTOR_DATA..=SHADER_DESCRIPTOR_DATA_END => {
-                        renderer.upload_shader_operand_descriptor(new)
-                    }
-                    _ => {}
                 }
             }
             _ => {}

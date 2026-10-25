@@ -83,6 +83,12 @@ impl ShaderUnit {
         }
     }
 
+    pub fn upload_programs(&mut self, words: &[u32]) {
+        for &word in words {
+            self.upload_program(word);
+        }
+    }
+
     pub fn upload_program(&mut self, word: u32) {
         if self.program_write_offset < PROGRAM_SIZE {
             if self.program[self.program_write_offset] != word {
@@ -158,6 +164,12 @@ impl ShaderUnit {
 
     /// float uniforms arrive component by component, three words carry four
     /// packed 24-bit floats, or four words carry plain singles.
+    pub fn upload_float_uniforms(&mut self, words: &[u32]) {
+        for &word in words {
+            self.upload_float_uniform(word);
+        }
+    }
+
     pub fn upload_float_uniform(&mut self, word: u32) {
         let needed = if self.float_uniform_wide { 4 } else { 3 };
         if self.float_uniform_component < 4 {
