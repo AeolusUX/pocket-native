@@ -1028,6 +1028,26 @@ fn color_words(r: &[u32]) -> impl Iterator<Item = u32> + '_ {
 
 /// reads the configuration of one texture unit and copies its image out of
 /// guest memory, or None when the unit is disabled or unusable.
+/// what a unit that is on but points at no texture samples: transparent
+/// black. the PICA gives the last color it fetched there, which drawing
+/// can't follow, and transparent comes closest. Pokémon X and Y draw the
+/// male player's cheeks with no texture, squares that an alpha test drops
+/// instead of showing them black.
+fn empty_texture() -> BoundTexture {
+    static TEXELS: std::sync::OnceLock<Arc<[[u8; 4]]>> = std::sync::OnceLock::new();
+    BoundTexture {
+        texels: TEXELS.get_or_init(|| Arc::from([[0u8; 4]].as_slice())).clone(),
+        etc1: None,
+        drawn: None,
+        linear: false,
+        wrap_s: Wrap::Repeat,
+        wrap_t: Wrap::Repeat,
+        width: 1,
+        height: 1,
+        border: [0.0; 4],
+    }
+}
+
 fn bind_texture<M: GpuMemory>(
     registers: &[u32],
     memory: &mut M,
@@ -1045,7 +1065,7 @@ fn bind_texture<M: GpuMemory>(
     let height = dimensions & 0x7FF;
     let width = (dimensions >> 16) & 0x7FF;
     if width == 0 || height == 0 {
-        return None;
+        return Some(empty_texture());
     }
 
     let format_register = if unit == 0 { base + 13 } else { base + 5 };
@@ -1053,7 +1073,7 @@ fn bind_texture<M: GpuMemory>(
     let address = loc_register(registers, base + 4);
     if address == 0 {
         // a unit pointed at nothing.
-        return None;
+        return Some(empty_texture());
     }
 
     let addr = memory.translate(address);
