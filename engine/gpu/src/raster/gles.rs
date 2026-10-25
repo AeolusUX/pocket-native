@@ -235,8 +235,10 @@ void main() {
 
 const VERTEX_SIZE: usize = 24 * 4;
 const PROCTEX_WORDS: usize = 8;
-const UNIFORM_WORDS: usize = 12 * 4 + 4 + 3 * 4 + 4 + 328 + PROCTEX_WORDS + COLOR_WORDS;
-const TABLES_SIZE: usize = (24 * 256 + 3 * proctex::MAP_ENTRIES + 4 * proctex::COLOR_ENTRIES) * 8;
+/// the fog's color, and room.
+const FOG_WORDS: usize = 4;
+const UNIFORM_WORDS: usize = 12 * 4 + 4 + 3 * 4 + 4 + 328 + PROCTEX_WORDS + COLOR_WORDS + FOG_WORDS;
+const TABLES_SIZE: usize = (24 * 256 + 3 * proctex::MAP_ENTRIES + 4 * proctex::COLOR_ENTRIES + crate::fog::ENTRIES) * 8;
 const FRAGMENT_CONSTANTS: usize = 30;
 const WRITES_DEPTH: u32 = 4;
 
@@ -3558,9 +3560,9 @@ pub struct Gles {
     shaded_array: glow::VertexArray,
     generic: bool,
     vertex_array: glow::VertexArray,
-    tables: Option<(u64, u64)>,
+    tables: Option<(u64, u64, u64)>,
     table_hashes: [(u64, u64); 24],
-    table_sets: rustc_hash::FxHashMap<[u64; 25], (u64, Arc<[u8]>)>,
+    table_sets: rustc_hash::FxHashMap<[u64; 26], (u64, Arc<[u8]>)>,
     table_set_ids: u64,
     texture_names: Vec<glow::Texture>,
     names_coming: Option<std::sync::mpsc::Receiver<Vec<glow::Texture>>>,
@@ -5495,15 +5497,15 @@ impl Gles {
         Ok(sampler)
     }
 
-    fn upload_tables(&mut self, tables: &Tables, procedural: &proctex::Tables) {
+    fn upload_tables(&mut self, tables: &Tables, procedural: &proctex::Tables, fog: &crate::fog::Table) {
         let _timed = timed(7);
         use std::hash::Hasher;
-        let generation = (tables.generation(), procedural.generation());
+        let generation = (tables.generation(), procedural.generation(), fog.generation());
         if self.tables == Some(generation) {
             return;
         }
         self.tables = Some(generation);
-        let mut key = [0u64; 25];
+        let mut key = [0u64; 26];
         for (table, (changed, hash)) in self.table_hashes.iter_mut().enumerate() {
             if *changed != tables.changed()[table] {
                 let mut hasher = rustc_hash::FxHasher::default();
@@ -5514,6 +5516,7 @@ impl Gles {
             key[table] = *hash;
         }
         key[24] = procedural.generation();
+        key[25] = fog.generation();
         if self.table_sets.len() > 256 {
             self.table_sets.clear();
         }
@@ -5526,6 +5529,7 @@ impl Gles {
                     procedural.maps().as_flattened().as_flattened(),
                     colors.as_flattened(),
                     steps.as_flattened(),
+                    fog.entries().as_flattened(),
                 ];
                 let mut bytes = Vec::with_capacity(TABLES_SIZE);
                 for part in parts {
@@ -5675,8 +5679,8 @@ impl Gles {
                 enabled |= 1 << unit;
             }
         }
-        if draw.lighting.is_some() || draw.proctex {
-            self.upload_tables(draw.tables, draw.proctex_tables);
+        if draw.lighting.is_some() || draw.proctex || draw.fog {
+            self.upload_tables(draw.tables, draw.proctex_tables, draw.fog_table);
         }
 
         let depth_map = draw.depth_map;
@@ -5703,11 +5707,12 @@ impl Gles {
         words.extend([depth_flags, draw.lighting.is_some() as u32, depth_map.scale.to_bits(), depth_map.offset.to_bits()]);
         match draw.lighting {
             Some(lighting) => lighting.pack(&mut words),
-            None => words.resize(UNIFORM_WORDS - PROCTEX_WORDS - COLOR_WORDS, 0),
+            None => words.resize(UNIFORM_WORDS - PROCTEX_WORDS - COLOR_WORDS - FOG_WORDS, 0),
         }
         let base = proctex::REG_CONFIG;
         words.extend([r[base], r[base + 1], r[base + 2], r[base + 3], r[base + 4], r[base + 5], 0, 0]);
         words.extend(color_words(r));
+        words.extend([r[crate::fog::REG_COLOR], 0, 0, 0]);
 
         let mut constants = [0u32; FRAGMENT_CONSTANTS];
         for (i, base) in STAGE_REGISTERS.into_iter().enumerate() {

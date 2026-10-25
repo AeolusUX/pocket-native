@@ -33,6 +33,9 @@ pub(super) struct Draw<'a> {
     /// whether the procedural texture is on, and its tables.
     pub(super) proctex: bool,
     pub(super) proctex_tables: &'a proctex::Tables,
+    /// whether the fog is on, and its table.
+    pub(super) fog: bool,
+    pub(super) fog_table: &'a crate::fog::Table,
 }
 
 /// the triangles of a draw.

@@ -737,6 +737,7 @@ pub struct Resources {
     meshes: MeshCache,
     pub light_tables: Tables,
     pub proctex_tables: crate::proctex::Tables,
+    pub fog_table: crate::fog::Table,
     /// the host GPU, when draws go to it rather than to the software path.
     #[cfg(feature = "gles")]
     pub(crate) hardware: Option<HostRenderer>,
@@ -1485,6 +1486,9 @@ struct DrawState<'a> {
     /// texture 3, made up from its coordinates, and its tables.
     proctex: Option<crate::proctex::ProcTex<'a>>,
     proctex_tables: &'a crate::proctex::Tables,
+    /// the fog, when its mode mixes it in, and its table.
+    fog: Option<crate::fog::Fog<'a>>,
+    fog_table: &'a crate::fog::Table,
 }
 
 #[cfg(feature = "gles")]
@@ -1507,6 +1511,8 @@ impl DrawState<'_> {
             tables: self.tables,
             proctex: self.proctex.is_some(),
             proctex_tables: self.proctex_tables,
+            fog: self.fog.is_some(),
+            fog_table: self.fog_table,
         }
     }
 }
@@ -1654,6 +1660,9 @@ fn fill_triangle(
                     stats.alpha_failed += 1;
                     continue;
                 }
+            }
+            if let Some(fog) = &state.fog {
+                fog.apply(&mut rgba, depth);
             }
 
             if let (Some(buffer), Some((stored_depth, stored_stencil)), Some(surface)) =
@@ -2106,6 +2115,8 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
         tables: &resources.light_tables,
         proctex: crate::proctex::ProcTex::read(registers, &resources.proctex_tables),
         proctex_tables: &resources.proctex_tables,
+        fog: crate::fog::Fog::read(registers, &resources.fog_table),
+        fog_table: &resources.fog_table,
     };
     // what the draw writes, which the textures of later draws in the list
     // may be

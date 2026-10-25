@@ -2,6 +2,7 @@
 
 mod overlay;
 pub mod blend;
+pub mod fog;
 pub mod proctex;
 pub mod format;
 pub mod lighting;
@@ -1456,6 +1457,9 @@ impl Gpu {
             proctex::REG_TABLE_DATA..=proctex::REG_TABLE_DATA_END => {
                 self.resources.proctex_tables.write(&mut self.internal, new);
             }
+            fog::REG_TABLE_DATA..=fog::REG_TABLE_DATA_END => {
+                self.resources.fog_table.write(&mut self.internal, new);
+            }
             REG_GS_BLOCK..=REG_GS_BLOCK_END => {
                 configure_shader(&mut self.geometry_shader, register - REG_GS_BLOCK, new);
             }
@@ -1514,6 +1518,7 @@ const ACTS: [bool; INTERNAL_REGISTER_WORDS] = {
         (REG_FIXED_ATTRIBUTE_INDEX, REG_FIXED_ATTRIBUTE_DATA_END),
         (lighting::REG_TABLE_DATA, lighting::REG_TABLE_DATA_END),
         (proctex::REG_TABLE_DATA, proctex::REG_TABLE_DATA_END),
+        (fog::REG_TABLE_DATA, fog::REG_TABLE_DATA_END),
         (REG_GS_BLOCK, REG_GS_BLOCK_END),
         (REG_VS_BLOCK, REG_VS_BLOCK_END),
     ];
