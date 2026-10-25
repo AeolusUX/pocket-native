@@ -2683,6 +2683,8 @@ struct Cached {
     cull: Option<u32>,
     vertex_array: Option<glow::VertexArray>,
     stride: Option<usize>,
+    /// the resident arrays the shaded vertex array reads and how.
+    resident: Option<(Vec<usize>, Vec<(usize, Attribute)>)>,
     uniforms: Vec<u32>,
     shading: Vec<u32>,
 }
@@ -2802,6 +2804,7 @@ struct Texture {
     used: u64,
 }
 
+#[derive(PartialEq)]
 enum Attribute {
     Constant([f32; 4]),
     Array { offset: usize, ty: u32, count: u32, stride: u32 },
@@ -3152,37 +3155,44 @@ impl DrawJob {
                                 for slot in slots.len() as u32..16 {
                                     gl.disable_vertex_attrib_array(slot);
                                 }
-                                local.cache.stride = None;
+                                (local.cache.stride, local.cache.resident) = (None, None);
                                 0
                             }
                             Attributes::Resident { arrays, slots } => {
                                 local.resident.draws += 1;
-                                let buffers = arrays.iter().map(|array| local.resident.buffer(&gl, array)).collect::<Result<Vec<_>, String>>()?;
-                                for (slot, (array, attribute)) in slots.iter().enumerate() {
-                                    let slot = slot as u32;
-                                    match *attribute {
-                                        Attribute::Array { offset, ty, count, stride } => {
-                                            let kind = [glow::BYTE, glow::UNSIGNED_BYTE, glow::SHORT, glow::FLOAT][(ty & 3) as usize];
-                                            gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffers[*array]));
-                                            gl.enable_vertex_attrib_array(slot);
-                                            gl.vertex_attrib_pointer_f32(slot, count as i32, kind, false, stride as i32, offset as i32);
-                                        }
-                                        Attribute::Constant(value) => {
-                                            gl.disable_vertex_attrib_array(slot);
-                                            gl.vertex_attrib_4_f32(slot, value[0], value[1], value[2], value[3]);
+                                // the draw before's arrays read the same way,
+                                // the vertex array still has them
+                                let key: Vec<usize> = arrays.iter().map(|array| Arc::as_ptr(array) as *const u8 as usize).collect();
+                                if !local.cache.resident.as_ref().is_some_and(|(last, read)| *last == key && *read == slots) {
+                                    let buffers = arrays.iter().map(|array| local.resident.buffer(&gl, array)).collect::<Result<Vec<_>, String>>()?;
+                                    for (slot, (array, attribute)) in slots.iter().enumerate() {
+                                        let slot = slot as u32;
+                                        match *attribute {
+                                            Attribute::Array { offset, ty, count, stride } => {
+                                                let kind = [glow::BYTE, glow::UNSIGNED_BYTE, glow::SHORT, glow::FLOAT][(ty & 3) as usize];
+                                                gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffers[*array]));
+                                                gl.enable_vertex_attrib_array(slot);
+                                                gl.vertex_attrib_pointer_f32(slot, count as i32, kind, false, stride as i32, offset as i32);
+                                            }
+                                            Attribute::Constant(value) => {
+                                                gl.disable_vertex_attrib_array(slot);
+                                                gl.vertex_attrib_4_f32(slot, value[0], value[1], value[2], value[3]);
+                                            }
                                         }
                                     }
+                                    for slot in slots.len() as u32..16 {
+                                        gl.disable_vertex_attrib_array(slot);
+                                    }
+                                    local.cache.stride = None;
+                                    local.cache.resident = Some((key, slots));
                                 }
-                                for slot in slots.len() as u32..16 {
-                                    gl.disable_vertex_attrib_array(slot);
-                                }
-                                local.cache.stride = None;
                                 0
                             }
                             Attributes::Packed { bytes, stride } => {
                                 let vertex_bytes = stride.max(1) * 16;
                                 let offset = local.inputs.push_aligned(&gl, glow::ARRAY_BUFFER, &bytes, vertex_bytes)?;
                                 BYTES.give(bytes);
+                                local.cache.resident = None;
                                 if local.cache.stride != Some(stride) {
                                     for slot in 0..16u32 {
                                         if (slot as usize) < stride {
