@@ -211,6 +211,10 @@ pub fn run(mut args: Vec<String>) {
     let mut skipped = 0;
     // interpolation waits for a second without skipping, it has no time then
     let mut last_skip = 0u64;
+    // sound mixes beside the title, as on the console's DSP
+    if std::env::var_os("ZAKURO_SYNC_SOUND").is_none() {
+        system.enable_async_sound();
+    }
     if std::env::var_os("ZAKURO_SYNC_GPU").is_none() {
         system.enable_async_gpu();
         system.realtime_gpu = std::env::var_os("ZAKURO_GPU_REALTIME").is_some();

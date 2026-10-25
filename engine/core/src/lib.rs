@@ -678,7 +678,14 @@ impl System {
     /// the stereo samples the console played since the last call, at
     /// AUDIO_SAMPLE_RATE.
     pub fn take_audio(&mut self) -> Vec<[i16; 2]> {
+        services::dsp::collect(self);
         std::mem::take(&mut self.services.dsp.output)
+    }
+
+    /// mixes the DSP's frames on a thread of its own from here on, as the
+    /// console's DSP mixes beside its CPU.
+    pub fn enable_async_sound(&mut self) {
+        services::dsp::start_sound_thread(&mut self.services.dsp);
     }
 
     /// what the software keyboard asks for, while a title waits on it.

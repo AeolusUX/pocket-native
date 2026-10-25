@@ -430,32 +430,57 @@ impl Voice {
         self.filters.process(&mut self.frame[..output]);
     }
 
-    /// adds what the voice played to one intermediate mix, fading from the
-    /// gains it had when they just changed.
-    fn mix_into(&mut self, mix: &mut QuadFrame, index: usize) {
-        let gains = self.gain[index];
-        let from = self.ramp[index].take();
-        // most voices reach only the first mix, the rest add nothing
-        if !self.enabled || (from.is_none() && gains == [0.0; 4]) {
-            return;
+    /// what mixing needs of what the voice played this frame, which takes
+    /// its gains' fades.
+    fn to_mix(&mut self) -> Option<VoiceMix> {
+        let from = [0, 1, 2].map(|index| self.ramp[index].take());
+        (self.enabled && (from.iter().any(Option::is_some) || self.gain.iter().any(|gains| *gains != [0.0; 4])))
+            .then(|| VoiceMix { frame: self.frame, gains: self.gain, from })
+    }
+}
+
+/// what one voice adds to the mixes in a frame, all that mixing needs, so
+/// it can happen on a thread of its own as the console's DSP does it.
+pub struct VoiceMix {
+    frame: Frame,
+    gains: [[f32; 4]; 3],
+    from: [Option<[f32; 4]>; 3],
+}
+
+/// the three intermediate mixes of what the voices played.
+pub fn mix(voices: &[VoiceMix]) -> [QuadFrame; 3] {
+    let mut mixes = [[[0; 4]; FRAME_SAMPLES]; 3];
+    for voice in voices {
+        for (index, mix) in mixes.iter_mut().enumerate() {
+            mix_frame(&voice.frame, voice.gains[index], voice.from[index], mix);
         }
-        // the four channels side by side, which the compiler does at once
-        let quad = |sample: &[i16; 2]| [sample[0] as f32, sample[1] as f32, sample[0] as f32, sample[1] as f32];
-        let Some(from) = from else {
-            for (out, sample) in mix.iter_mut().zip(&self.frame) {
-                let sample = quad(sample);
-                for c in 0..4 {
-                    out[c] += (gains[c] * sample[c]) as i32;
-                }
-            }
-            return;
-        };
-        let span: [f32; 4] = std::array::from_fn(|c| gains[c] - from[c]);
-        for ((out, sample), progress) in mix.iter_mut().zip(&self.frame).zip(RAMP) {
+    }
+    mixes
+}
+
+/// adds a frame to an intermediate mix at gains, fading to them from
+/// others when they just changed.
+fn mix_frame(frame: &Frame, gains: [f32; 4], from: Option<[f32; 4]>, mix: &mut QuadFrame) {
+    // most voices reach only the first mix, the rest add nothing
+    if from.is_none() && gains == [0.0; 4] {
+        return;
+    }
+    // the four channels side by side, which the compiler does at once
+    let quad = |sample: &[i16; 2]| [sample[0] as f32, sample[1] as f32, sample[0] as f32, sample[1] as f32];
+    let Some(from) = from else {
+        for (out, sample) in mix.iter_mut().zip(frame) {
             let sample = quad(sample);
             for c in 0..4 {
-                out[c] += ((from[c] + span[c] * progress) * sample[c]) as i32;
+                out[c] += (gains[c] * sample[c]) as i32;
             }
+        }
+        return;
+    };
+    let span: [f32; 4] = std::array::from_fn(|c| gains[c] - from[c]);
+    for ((out, sample), progress) in mix.iter_mut().zip(frame).zip(RAMP) {
+        let sample = quad(sample);
+        for c in 0..4 {
+            out[c] += ((from[c] + span[c] * progress) * sample[c]) as i32;
         }
     }
 }
@@ -505,7 +530,7 @@ impl Default for Voices {
 impl Voices {
     /// one audio frame, take in what the title changed, play, report, and
     /// return the three intermediate mixes the voices made.
-    pub fn tick(&mut self, memory: &mut Memory, layout: Layout) -> [QuadFrame; 3] {
+    pub fn tick(&mut self, memory: &mut Memory, layout: Layout) -> Vec<VoiceMix> {
         let read = current_region(memory, layout);
         let write = 1 - read;
         if log::log_enabled!(log::Level::Trace) {
@@ -519,7 +544,7 @@ impl Voices {
         let coefficients = layout.coefficients + read * REGION_STRIDE;
         let statuses = layout.statuses + write * REGION_STRIDE;
 
-        let mut mixes = [[[0; 4]; FRAME_SAMPLES]; 3];
+        let mut mixing = Vec::with_capacity(self.voices.len());
         for (index, voice) in self.voices.iter_mut().enumerate() {
             let base = configurations + index as u32 * CONFIG_SIZE;
             let was_enabled = voice.enabled;
@@ -544,12 +569,10 @@ impl Voices {
             if voice.enabled {
                 voice.play_frame(memory);
             }
-            for (mix, frame) in mixes.iter_mut().enumerate() {
-                voice.mix_into(frame, mix);
-            }
+            mixing.extend(voice.to_mix());
             write_status(voice, memory, statuses + index as u32 * STATUS_SIZE);
         }
-        mixes
+        mixing
     }
 }
 
@@ -766,16 +789,14 @@ mod tests {
             }
             mix
         };
-        let mut voice = Voice { enabled: true, ..Voice::default() };
-        for (i, sample) in voice.frame.iter_mut().enumerate() {
+        let mut frame = [[0; 2]; FRAME_SAMPLES];
+        for (i, sample) in frame.iter_mut().enumerate() {
             *sample = [(i as i32 * 977 % 65536 - 32768) as i16, (i as i32 * -613 % 32768) as i16];
         }
         for (from, gains) in [(None, [0.7, 1.3, 0.25, 0.0]), (Some([0.1, 0.9, 1.0, 0.33]), [0.8, 0.05, 0.6, 1.7])] {
-            voice.gain[0] = gains;
-            voice.ramp[0] = from;
             let mut mix = [[7; 4]; FRAME_SAMPLES];
-            voice.mix_into(&mut mix, 0);
-            assert_eq!(mix, reference(&voice.frame, from, gains));
+            mix_frame(&frame, gains, from, &mut mix);
+            assert_eq!(mix, reference(&frame, from, gains));
         }
     }
 
@@ -954,12 +975,10 @@ mod tests {
         voice.frame = [[1000, 1000]; FRAME_SAMPLES];
         voice.ramp[0] = Some([0.0; 4]);
         voice.gain[0] = [1.0; 4];
-        let mut mix = [[0; 4]; FRAME_SAMPLES];
-        voice.mix_into(&mut mix, 0);
+        let [mix, ..] = mix(&[voice.to_mix().unwrap()]);
         assert_eq!(mix[0], [0; 4]);
         assert_eq!(mix[FRAME_SAMPLES - 1], [1000; 4]);
-        let mut again = [[0; 4]; FRAME_SAMPLES];
-        voice.mix_into(&mut again, 0);
+        let [again, ..] = super::mix(&[voice.to_mix().unwrap()]);
         assert_eq!(again[0], [1000; 4], "the fade happens once");
     }
 }
