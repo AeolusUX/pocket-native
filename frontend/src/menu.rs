@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::font::{rgba, Canvas};
 use crate::input::{A, B, DOWN, LEFT, RIGHT, UP};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Aspect, Buttons, Dpad, GameSettings, Layout, Power, Rotation, Settings, Speed, Stick, Stretch};
+use crate::settings::{Advanced, Aspect, Buttons, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings, Speed, Stick, Stretch};
 
 const PANEL: [u8; 3] = [13, 20, 32];
 const EDGE: [u8; 3] = [40, 110, 210];
@@ -39,6 +39,7 @@ enum Field {
     Buttons,
     LeftStick,
     Dpad,
+    RightStick,
     ReverseTiltX,
     ReverseTiltY,
     TouchControls,
@@ -172,7 +173,7 @@ fn sections(page: Page, profile: &Profile) -> Vec<(&'static str, Vec<Field>)> {
             ("Display", only(vec![Field::Layout, Field::Aspect, Field::Resolution, Field::Smooth, Field::Stretch, Field::Interpolate, Field::ShowFps, Field::ShowClock, Field::Rotation])),
             ("Performance", only(vec![Field::FrameCap, Field::Power])),
             ("This game", (0..profile.options.len()).map(Field::Option).collect()),
-            ("Controls", only(vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::Dpad, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
+            ("Controls", only(vec![Field::TouchSpeed, Field::Buttons, Field::LeftStick, Field::Dpad, Field::RightStick, Field::ReverseTiltX, Field::ReverseTiltY, Field::TouchControls, Field::EditControls])),
             ("Game", vec![Field::Resume, Field::Advanced, Field::Reset, Field::Quit]),
         ],
         Page::Advanced => vec![
@@ -256,6 +257,7 @@ fn label(field: Field, settings: &Settings, game: &GameSettings, profile: &Profi
             };
             ("D-pad", dpad.into())
         }
+        Field::RightStick => ("Right stick", if settings.right_stick == RightStick::CStick { "C-stick" } else { "Touch cursor" }.into()),
         Field::ReverseTiltX => ("Reverse tilt X", if settings.reverse_tilt_x { "On" } else { "Off" }.into()),
         Field::ReverseTiltY => ("Reverse tilt Y", if settings.reverse_tilt_y { "On" } else { "Off" }.into()),
         Field::TouchControls => ("Touch controls", if settings.touch_controls { "On" } else { "Off" }.into()),
@@ -313,6 +315,7 @@ fn change(field: Field, by: isize, settings: &mut Settings, game: &mut GameSetti
         Field::Buttons => settings.buttons = step(&[Buttons::Nintendo, Buttons::Xbox], settings.buttons, by),
         Field::LeftStick => settings.left_stick = step(&[Stick::CirclePad, Stick::Dpad], settings.left_stick, by),
         Field::Dpad => settings.dpad = step(&[Dpad::Dpad, Dpad::CirclePad, Dpad::Touch], settings.dpad, by),
+        Field::RightStick => settings.right_stick = step(&[RightStick::Cursor, RightStick::CStick], settings.right_stick, by),
         Field::ReverseTiltX => settings.reverse_tilt_x = !settings.reverse_tilt_x,
         Field::ReverseTiltY => settings.reverse_tilt_y = !settings.reverse_tilt_y,
         Field::TouchControls => settings.touch_controls = !settings.touch_controls,
@@ -354,6 +357,7 @@ fn help(field: Field, profile: &Profile) -> &str {
         Field::Buttons => "Which face buttons are A and B: where Nintendo puts them, or where Xbox does.",
         Field::LeftStick => "The left stick as the circle pad, or as the d-pad.",
         Field::Dpad => "The d-pad as itself, the circle pad or the touch cursor. FN or L3 with Select switches it in game.",
+        Field::RightStick => "The touch cursor, or the C-stick with L2 and R2 as ZL and ZR for New 3DS games. R3 switches it in game.",
         Field::ReverseTiltX => "Holding L2, the right stick tilts the console. On tilts it the other way left and right.",
         Field::ReverseTiltY => "Holding L2, the right stick tilts the console. On tilts it the other way up and down.",
         Field::TouchControls => "Buttons and a circle pad on the touch screen. They hide while a gamepad is used.",

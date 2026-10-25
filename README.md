@@ -89,7 +89,8 @@ the picture for a panel mounted sideways.
 | D-pad | D-pad |
 | Left stick | Circle pad, or the D-pad (Controls in the menu) |
 | Right stick | Moves the touch cursor |
-| R2 or R3 | Touches the bottom screen under the cursor |
+| R2 | Touches the bottom screen under the cursor |
+| R3 | Switches the right stick to the C-stick, with L2 and R2 as ZL and ZR, and back |
 | L2 held + right stick | Tilts the console, for games that use motion |
 | Start / Select | Start / Select |
 

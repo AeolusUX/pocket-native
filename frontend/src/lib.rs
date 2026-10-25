@@ -8,7 +8,8 @@
 //! of L2 or FN+L1 swaps the screens, FN+R1 shows both or one big, FN+Select
 //! turns the d-pad into the circle pad or the touch cursor, L3 doing for FN
 //! in these, the right stick moves the touch cursor and R2 touches, or tilts
-//! the console with L2 held. Reset in the menu exits with 3, for the
+//! the console with L2 held, and R3 makes it the C-stick with L2 and R2 as
+//! ZL and ZR, and back. Reset in the menu exits with 3, for the
 //! launcher to start the game again.
 //!
 //! pocket-native --probe <rom> [frames] tries a game as fast as it runs and
@@ -32,7 +33,7 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use zakuro_core::services::hid::{parse_input_script, scripted_input, InputState};
+use zakuro_core::services::hid::{parse_input_script, scripted_input, InputState, PadState};
 use zakuro_core::{loader, Config, FrameOutcome, System};
 use zakuro_gpu::Overlay;
 
@@ -40,7 +41,7 @@ use crate::font::{Canvas, Font};
 use crate::input::{Pad, FN, L1, L2, L3, R1, R2, R3, SELECT, START};
 use crate::menu::{Action, Menu, Status};
 use crate::profile::Profile;
-use crate::settings::{Advanced, Dpad, GameSettings, Layout, Power, Rotation, Settings};
+use crate::settings::{Advanced, Dpad, GameSettings, Layout, Power, RightStick, Rotation, Settings};
 
 /// the exit code that asks the launcher to start the game again.
 const RESET: i32 = 3;
@@ -377,15 +378,18 @@ pub fn run(mut args: Vec<String>) {
         if l2 {
             tilt_from = (Instant::now(), false);
         }
+        // the right stick as the C-stick, L2 and R2 as ZL and ZR, which
+        // leaves tilting and touching to the cursor's way
+        let c_stick = settings.right_stick == RightStick::CStick;
         let reversed = |reverse: bool| if reverse { -1.0 } else { 1.0 };
-        let tilt = if keys.contains(&L2) {
+        let tilt = if keys.contains(&L2) && !c_stick {
             (input::stick(axes[3]) * reversed(settings.reverse_tilt_x), input::stick(axes[4]) * reversed(settings.reverse_tilt_y))
         } else {
             (0.0, 0.0)
         };
         tilt_from.1 |= tilt != (0.0, 0.0);
         // L2 let go soon and without tilting swaps the screens
-        let l2_tapped = held.contains(&L2) && !keys.contains(&L2) && !tilt_from.1 && tilt_from.0.elapsed() < Duration::from_millis(300);
+        let l2_tapped = !c_stick && held.contains(&L2) && !keys.contains(&L2) && !tilt_from.1 && tilt_from.0.elapsed() < Duration::from_millis(300);
         if hotkey && l1 || l2_tapped {
             settings.swapped = !settings.swapped;
         }
@@ -399,6 +403,14 @@ pub fn run(mut args: Vec<String>) {
                 Dpad::Touch => (Dpad::Dpad, "D-pad: d-pad"),
             };
             (settings.dpad, note) = (dpad, Some((said, Instant::now())));
+        }
+        // R3 switches the right stick between the touch cursor and the C-stick
+        if !hotkey && keys.contains(&R3) && !held.contains(&R3) {
+            let (right_stick, said) = match settings.right_stick {
+                RightStick::Cursor => (RightStick::CStick, "Right stick: C-stick"),
+                RightStick::CStick => (RightStick::Cursor, "Right stick: touch cursor"),
+            };
+            (settings.right_stick, note) = (right_stick, Some((said, Instant::now())));
         }
         held = keys.clone();
 
@@ -417,14 +429,20 @@ pub fn run(mut args: Vec<String>) {
         let cap = fixed_cap.unwrap_or(settings.frame_cap as f64);
         let unshown = shown_only && probe.is_none() && settings.interpolate_to == 0 && frame_number + 1 < presented + (60.0 / cap).ceil() as u64;
         system.skip_frames(skip, unshown);
-        let (buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings) };
-        let step = input::cursor_step(settings.touch_speed);
-        if !keys.contains(&L2) {
-            let (across, down) = if settings.dpad == Dpad::Touch { input::dpad(&keys) } else { (0.0, 0.0) };
-            cursor.0 = (cursor.0 + (input::stick(axes[3]) + across).clamp(-1.0, 1.0) * step).clamp(0.0, 319.0);
-            cursor.1 = (cursor.1 + (input::stick(axes[4]) + down).clamp(-1.0, 1.0) * step).clamp(0.0, 239.0);
+        let (mut buttons, circle_x, circle_y) = if hotkey { (Default::default(), 0.0, 0.0) } else { input::controls(&keys, &axes, &settings) };
+        let (c_stick_x, c_stick_y) = if c_stick && !hotkey { (input::stick(axes[3]), -input::stick(axes[4])) } else { (0.0, 0.0) };
+        if c_stick && !hotkey {
+            buttons.set(PadState::ZL, keys.contains(&L2));
+            buttons.set(PadState::ZR, keys.contains(&R2));
         }
-        let mut touching = keys.contains(&R2) || keys.contains(&R3);
+        let step = input::cursor_step(settings.touch_speed);
+        if c_stick || !keys.contains(&L2) {
+            let (across, down) = if settings.dpad == Dpad::Touch { input::dpad(&keys) } else { (0.0, 0.0) };
+            let (x, y) = if c_stick { (0.0, 0.0) } else { (input::stick(axes[3]), input::stick(axes[4])) };
+            cursor.0 = (cursor.0 + (x + across).clamp(-1.0, 1.0) * step).clamp(0.0, 319.0);
+            cursor.1 = (cursor.1 + (y + down).clamp(-1.0, 1.0) * step).clamp(0.0, 239.0);
+        }
+        let mut touching = !c_stick && keys.contains(&R2);
         // a finger on the bottom screen where it is shown touches there, and
         // moves the cursor along: on the panel, unless the bottom screen is on
         // a second window by itself, or there
@@ -445,7 +463,7 @@ pub fn run(mut args: Vec<String>) {
         if probe.is_some() && script.is_empty() {
             system.set_input(InputState { buttons: probe::Probe::buttons(frame_number), ..Default::default() });
         } else if script.is_empty() {
-            system.set_input(InputState { buttons, circle_x, circle_y, c_stick_x: 0.0, c_stick_y: 0.0, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)), tilt });
+            system.set_input(InputState { buttons, circle_x, circle_y, c_stick_x, c_stick_y, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)), tilt });
         } else {
             system.set_input(scripted_input(&script, frame_number));
         }

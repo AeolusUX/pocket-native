@@ -97,6 +97,14 @@ pub enum Dpad {
     Touch,
 }
 
+/// the right stick as the touch cursor, or as the New 3DS's C-stick with L2
+/// and R2 as ZL and ZR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RightStick {
+    Cursor,
+    CStick,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rotation {
     Auto,
@@ -136,6 +144,8 @@ pub struct Settings {
     /// the d-pad as the circle pad or the touch cursor, for handhelds short
     /// of sticks.
     pub dpad: Dpad,
+    /// the right stick as the touch cursor or the C-stick, R3 switching it.
+    pub right_stick: RightStick,
     /// tilting with L2 and the right stick the other way, left and right
     /// or up and down.
     pub reverse_tilt_x: bool,
@@ -164,6 +174,7 @@ impl Default for Settings {
             buttons: Buttons::Nintendo,
             left_stick: Stick::CirclePad,
             dpad: Dpad::Dpad,
+            right_stick: RightStick::Cursor,
             reverse_tilt_x: false,
             reverse_tilt_y: false,
             touch_controls: cfg!(target_os = "android"),
