@@ -16,6 +16,7 @@ pub mod glyphs;
 pub mod gsp;
 pub mod hid;
 pub mod ir;
+pub mod ir_rst;
 pub mod keyboard;
 pub mod ldr_ro;
 pub mod mii_selector;
@@ -68,6 +69,7 @@ pub struct ServiceState {
     pub fs: fs::FsState,
     pub dsp: dsp::DspState,
     pub ir: ir::IrState,
+    pub ir_rst: ir_rst::IrRstState,
     pub y2r: y2r::Y2rState,
     pub nfc: nfc::NfcState,
     pub cecd: cecd::CecdState,
@@ -105,6 +107,7 @@ pub fn handle_request(system: &mut System, target: Target) {
         "dsp::DSP" => dsp::handle(system, &buffer, header),
         "ldr:ro" => ldr_ro::handle(system, &buffer, header),
         "ir:USER" => ir::handle(system, &buffer, header),
+        "ir:rst" => ir_rst::handle(system, &buffer, header),
         "y2r:u" => y2r::handle(system, &buffer, header),
         "frd:u" | "frd:a" => frd::handle(system, &buffer, header),
         "nfc:u" | "nfc:m" => nfc::handle(system, &buffer, header),

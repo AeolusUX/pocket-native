@@ -376,6 +376,20 @@ impl Memory {
         }
     }
 
+    /// reads straight from physical memory, zeroes where nothing backs it.
+    pub fn read_physical(&mut self, paddr: u32, out: &mut [u8]) -> bool {
+        match self.phys.host_slice_mut(paddr, out.len() as u32) {
+            Some(slice) => {
+                out.copy_from_slice(slice);
+                true
+            }
+            None => {
+                out.fill(0);
+                false
+            }
+        }
+    }
+
     /// zeroes a physical range, for BSS and freshly allocated pages.
     pub fn zero_physical(&mut self, paddr: u32, size: u32) -> bool {
         match self.phys.host_slice_mut(paddr, size) {

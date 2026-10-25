@@ -669,6 +669,10 @@ impl System {
             services::dsp::advance(self);
             services::dsp::signal_semaphore(self);
         }
+        // the devices that report at a rate a title sets, which this is
+        // fine enough for
+        services::ir_rst::tick(self);
+        services::ir::tick(self);
     }
 
     /// the stereo samples the console played since the last call, at

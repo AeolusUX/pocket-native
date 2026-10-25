@@ -445,7 +445,7 @@ pub fn run(mut args: Vec<String>) {
         if probe.is_some() && script.is_empty() {
             system.set_input(InputState { buttons: probe::Probe::buttons(frame_number), ..Default::default() });
         } else if script.is_empty() {
-            system.set_input(InputState { buttons, circle_x, circle_y, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)), tilt });
+            system.set_input(InputState { buttons, circle_x, circle_y, c_stick_x: 0.0, c_stick_y: 0.0, touch: touching.then_some((cursor.0 as u16, cursor.1 as u16)), tilt });
         } else {
             system.set_input(scripted_input(&script, frame_number));
         }
