@@ -16,9 +16,6 @@ pub const SIGNAL_WAKEUP_BY_EXIT: u32 = 10;
 
 /// the running title's own applet id.
 pub(crate) const APPLICATION: u32 = 0x300;
-/// the id a title asks IsRegistered about for whatever library applet it
-/// may have running.
-const ANY_LIBRARY_APPLET: u32 = 0x400;
 
 #[derive(Debug, Clone)]
 pub struct Parameter {
@@ -212,13 +209,19 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             true
         }
         // IsRegistered(app id) -> true, so a title believes the applet it
-        // asked about exists. any library applet is there only while the
-        // title prepares or runs one, a title told one is there cancels it
-        // and waits for it to close, Yo-kai Watch 2 as it starts
+        // asked about exists. a library applet is there only while the
+        // title prepares or runs it: a title told one is there cancels it
+        // and waits for it to close, Yo-kai Watch 2 as it starts, and one
+        // told its applet is there already skips preparing it and waits
+        // for an answer, Kirby: Triple Deluxe and the Mii selector
         0x0009 => {
             let applet = buffer.get(&mut system.memory, 1);
             let apt = &system.services.apt;
-            let registered = applet != ANY_LIBRARY_APPLET || apt.library_applet.is_some() || apt.keyboard.is_some();
+            let running = apt.library_applet.or(apt.keyboard.as_ref().map(|_| super::keyboard::APPLET_ID));
+            let registered = match applet & 0xF00 {
+                0x200 | 0x400 => running.is_some_and(|running| applet & 0xFF == 0 || running & 0xFF == applet & 0xFF),
+                _ => true,
+            };
             buffer.reply(&mut system.memory, 0x0009, &[registered as u32]);
             true
         }

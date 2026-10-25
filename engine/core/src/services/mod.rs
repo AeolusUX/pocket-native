@@ -239,12 +239,15 @@ pub(crate) mod tests {
             buffer.get(&mut system.memory, 2)
         };
         assert_eq!(is_registered(&mut system, 0x400), 0);
+        assert_eq!(is_registered(&mut system, 0x402), 0);
         assert_eq!(is_registered(&mut system, 0x101), 1);
         // PrepareToStartLibraryApplet(software keyboard)
         buffer.set(&mut system.memory, 0, Header::new(0x0018, 1, 0).0);
         buffer.set(&mut system.memory, 1, 0x401);
         handle_request(&mut system, Target::service("APT:A".into(), 0));
         assert_eq!(is_registered(&mut system, 0x400), 1);
+        assert_eq!(is_registered(&mut system, 0x401), 1);
+        assert_eq!(is_registered(&mut system, 0x402), 0);
     }
 
     pub(crate) fn system_with_thread() -> (System, CommandBuffer) {
