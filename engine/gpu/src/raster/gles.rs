@@ -4006,6 +4006,33 @@ impl Gles {
         (!self.surfaces.iter().any(|s| s.dirty_overlaps(texture.addr, lead_bytes))).then_some((index, lead))
     }
 
+    /// a texture inside rows a drawing of another width drew, as Moon's
+    /// bloom samples the smaller buffers it drew into the bigger one's
+    /// memory: the drawing and the texture's first tile in it, the copy
+    /// takes the tiles over a run at a time on the GPU rather than reading
+    /// the drawing back. RGBA8 alone, which a blit leaves as it is.
+    fn retiled_source(&self, texture: &DrawnTexture) -> Option<(usize, i64)> {
+        let kind = Kind::Color(ColorFormat::Rgba8);
+        if texture.format != ColorFormat::Rgba8 || texture.width % 8 != 0 || texture.height % 8 != 0 {
+            return None;
+        }
+        let (tile, len) = (64 * kind.bytes(), texture.width * texture.height * kind.bytes());
+        let (index, s) = self.surfaces.iter().enumerate().find(|(_, s)| s.dirty_overlaps(texture.addr, len))?;
+        let (first, last) = s.dirty?;
+        let offset = (texture.addr.checked_sub(s.addr).filter(|offset| offset % tile == 0)? / tile) as i64;
+        let (across, other_across) = ((texture.width / 8) as i64, (s.width / 8) as i64);
+        // its dirty rows are what it drew, though others took rows of it
+        let fits = s.kind == kind
+            && s.tiled
+            && s.width != texture.width
+            && s.width % 8 == 0
+            && s.addr + first * s.row_bytes() <= texture.addr
+            && texture.addr + len <= s.addr + last * s.row_bytes()
+            && (other_across % across == 0 && offset % across == 0 || across % other_across == 0 && offset % other_across == 0);
+        let alone = !self.surfaces.iter().enumerate().any(|(i, o)| i != index && o.dirty_overlaps(texture.addr, len));
+        (fits && alone).then_some((index, offset))
+    }
+
     /// the surface a drawn texture is the whole of, as it is, which a draw
     /// into another surface samples in place, upside down, rather than a copy.
     fn whole_surface(&self, texture: &DrawnTexture) -> Option<usize> {
@@ -4023,7 +4050,7 @@ impl Gles {
         if *FROM_MEMORY.get_or_init(|| crate::switch("ZAKURO_NO_GPU_TEXTURES", "drawn textures read from memory")) {
             return false;
         }
-        self.texture_source(texture).is_some_and(|(index, _)| self.surfaces[index].dirty.is_some()) || self.texture_over_drawing(texture).is_some()
+        self.texture_source(texture).is_some_and(|(index, _)| self.surfaces[index].dirty.is_some()) || self.texture_over_drawing(texture).is_some() || crate::fast_with(crate::speedup::TILES) && self.retiled_source(texture).is_some()
     }
 
     fn copy_objects(&mut self, texture: &DrawnTexture) -> Result<(([glow::Program; 3], glow::VertexArray), (glow::Texture, glow::Framebuffer)), String> {
@@ -4146,6 +4173,9 @@ impl Gles {
     }
 
     fn copy_texture<M: GpuMemory>(&mut self, memory: &mut M, texture: &DrawnTexture) -> Result<glow::Texture, String> {
+        if let Some((source, offset)) = self.retiled_source(texture) {
+            return self.copy_retiled(texture, source, offset);
+        }
         if self.texture_source(texture).is_none() {
             if let Some((source, lead)) = self.texture_over_drawing(texture) {
                 return self.copy_over_drawing(memory, texture, source, lead);
@@ -4218,6 +4248,44 @@ impl Gles {
                         }
                     }
                 }
+            }
+        });
+        Ok(copy)
+    }
+
+    /// the copy of a texture inside a drawing of another width, its tiles
+    /// blitted over from the drawing a run at a time, as adopt does.
+    fn copy_retiled(&mut self, texture: &DrawnTexture, source: usize, offset: i64) -> Result<glow::Texture, String> {
+        self.surfaces[source].used = self.flushes;
+        let (_, (copy, framebuffer)) = self.copy_objects(texture)?;
+        let read = self.framebuffer(Some(source), None)?;
+        let surface = &self.surfaces[source];
+        let stamp = (surface.texture, surface.version, 0x8000_0000 | offset as u32);
+        if self.copied.insert(*texture, stamp) == Some(stamp) {
+            return Ok(copy);
+        }
+        let (image, quarters, gl) = (surface.texture, self.quarters as i64, self.gl);
+        let (across, other_across, height) = ((texture.width / 8) as i64, (surface.width / 8) as i64, surface.height as i64);
+        let tiles = across * (texture.height / 8) as i64;
+        self.worker.post_keeping(move || {
+            flush_clears(Some(image));
+            disturb();
+            // SAFETY: on the GL thread, every run lies inside both the
+            // drawing and the copy
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(read));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(framebuffer));
+                gl.disable(glow::SCISSOR_TEST);
+                gl.color_mask(true, true, true, true);
+                let up = |length: i64| (length * quarters / 4) as i32;
+                let run = across.min(other_across);
+                // the drawing upside down, the copy the right way up
+                for at in (0..tiles).step_by(run as usize) {
+                    let (x, y) = ((offset + at) % other_across * 8, (offset + at) / other_across * 8);
+                    let (to_x, to_y) = (at % across * 8, at / across * 8);
+                    gl.blit_framebuffer(up(x), up(height - y - 8), up(x + run * 8), up(height - y), up(to_x), up(to_y + 8), up(to_x + run * 8), up(to_y), glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
         });
         Ok(copy)
@@ -5873,7 +5941,7 @@ impl Gles {
             if let Some(texture) = texture {
                 let sampler = self.sampler(texture.linear, texture.wrap_s, texture.wrap_t)?;
                 let image = match &texture.drawn {
-                    Some(drawn) => match self.whole_surface(drawn).filter(|&index| index != color) {
+                    Some(drawn) => match self.whole_surface(drawn).filter(|&index| index != color && self.surfaces[index].dirty.is_some()) {
                         Some(index) => {
                             self.surfaces[index].used = self.flushes;
                             sources[unit] = Some(self.surfaces[index].texture);
@@ -6242,6 +6310,41 @@ mod tests {
         assert_eq!(read_copy(&mut gles, &over), decoded(&memory, base, lead + drawn));
         // the drawing stayed on the GPU
         assert!(gles.surfaces.iter().any(|s| s.addr == drawing && s.dirty.is_some()));
+    }
+
+    #[test]
+    fn a_texture_inside_a_drawing_of_another_width_is_copied_on_the_gpu() {
+        let mut gles = match Gles::new() {
+            Ok(gles) => gles,
+            Err(error) => {
+                eprintln!("no OpenGL ES here, skipped: {error}");
+                return;
+            }
+        };
+        let format = ColorFormat::Rgba8;
+        let (base, width, height) = (0x1000u32, 256u32, 128u32);
+        let mut memory = Flat(vec![0; 0x30000]);
+        for (i, byte) in memory.0[base as usize..(base + width * height * 4) as usize].iter_mut().enumerate() {
+            *byte = (i * 31 + i / 7) as u8;
+        }
+        let index = gles.surface_rows(&mut memory, base, (width, height), Kind::Color(format), true, None).unwrap();
+        gles.surfaces[index].drew((0, height));
+        // Moon's bloom samples the smaller buffers it drew in the bigger one's memory
+        for (offset, w, h) in [(0x10000u32, 64u32, 32u32), (0x8000, 128, 64), (0, 512, 16)] {
+            let texture = DrawnTexture { addr: base + offset, width: w, height: h, format };
+            assert!(gles.retiled_source(&texture).is_some());
+            gles.copy_texture(&mut memory, &texture).unwrap();
+            let mut expected = vec![0u8; (w * h * 4) as usize];
+            for y in 0..h {
+                for x in 0..w {
+                    let at = (texture.addr + pixel_offset(true, x, y, w, 4) as u32) as usize;
+                    let o = ((y * w + x) * 4) as usize;
+                    expected[o..o + 4].copy_from_slice(&format.decode(&memory.0[at..at + 4]));
+                }
+            }
+            assert_eq!(read_copy(&mut gles, &texture), expected, "{w}x{h} at {offset:X}");
+        }
+        assert!(gles.surfaces[index].dirty.is_some(), "the drawing stayed on the GPU");
     }
 
     #[test]
