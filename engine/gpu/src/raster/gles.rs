@@ -4981,8 +4981,26 @@ impl Gles {
                 let size = self.surfaces[index].size();
                 let row = self.surfaces[index].row_bytes();
                 let (from, to) = rows.map_or((addr, size), |(start, end)| (addr + start * row, (end - start) * row));
-                let others = (0..self.surfaces.len()).any(|i| i != index && self.surfaces[i].dirty_overlaps(from, to));
-                if !others {
+                // what others drew there comes over without waiting on the GL thread
+                if self.adopt_all(index, from, to)?.is_empty() {
+                    // all of it drawn, no row of memory goes up, it is only
+                    // kept as the GL thread would
+                    if self.surfaces[index].dirty == Some((0, height)) {
+                        let bytes = match memory.slice(addr, size as usize) {
+                            Some(bytes) => bytes.to_vec(),
+                            None => {
+                                let mut bytes = vec![0; size as usize];
+                                memory.read(addr, &mut bytes);
+                                bytes
+                            }
+                        };
+                        let surface = &mut self.surfaces[index];
+                        if bytes != surface.shadow {
+                            (surface.shadow, surface.picture) = (bytes, None);
+                        }
+                        (surface.checked, surface.stale) = (true, false);
+                        return Ok(index);
+                    }
                     // memory nothing wrote over since it held the shadow
                     // still does, it is compared again now and then all the
                     // same in case a write went past the journal
@@ -5058,12 +5076,7 @@ impl Gles {
         let size = self.surfaces[index].size();
         let row = self.surfaces[index].row_bytes();
         let (from, to) = rows.map_or((addr, size), |(start, end)| (addr + start * row, (end - start) * row));
-        let mut others = Vec::new();
-        for other in (0..self.surfaces.len()).filter(|&i| i != index && self.surfaces[i].dirty_overlaps(from, to)).collect::<Vec<_>>() {
-            if !self.adopt(index, other)? {
-                others.push(other);
-            }
-        }
+        let others = self.adopt_all(index, from, to)?;
         if !others.is_empty() {
             self.write_back(memory, others)?;
         }
@@ -5084,12 +5097,32 @@ impl Gles {
         Ok(index)
     }
 
+    /// the surfaces drawn over a surface's memory from addr for len bytes
+    /// whose tiles could not come over, tried again while any does, the
+    /// rows one brings may join those of one that could not come before it.
+    fn adopt_all(&mut self, index: usize, addr: u32, len: u32) -> Result<Vec<usize>, String> {
+        let mut others: Vec<usize> = (0..self.surfaces.len()).filter(|&i| i != index && self.surfaces[i].dirty_overlaps(addr, len)).collect();
+        loop {
+            let before = others.len();
+            let mut left = Vec::new();
+            for other in others {
+                if !self.adopt(index, other)? {
+                    left.push(other);
+                }
+            }
+            others = left;
+            if others.is_empty() || others.len() == before {
+                return Ok(others);
+            }
+        }
+    }
+
     /// tiles another surface drew over this one's memory come over on the
     /// GPU, with the drawing, rather than through memory, when whole rows of
     /// tiles of both line up.
     fn adopt(&mut self, index: usize, other: usize) -> Result<bool, String> {
         let (s, o) = (&self.surfaces[index], &self.surfaces[other]);
-        if s.kind != o.kind || !matches!(s.kind, Kind::Depth(_)) || !s.tiled || !o.tiled || !crate::fast_with(crate::speedup::TILES) || s.width % 8 != 0 || o.width % 8 != 0 || s.height % 8 != 0 || o.height % 8 != 0 {
+        if s.kind != o.kind || !s.tiled || !o.tiled || !crate::fast_with(crate::speedup::TILES) || s.width % 8 != 0 || o.width % 8 != 0 || s.height % 8 != 0 || o.height % 8 != 0 {
             return Ok(false);
         }
         let (across, other_across) = ((s.width / 8) as i64, (o.width / 8) as i64);
@@ -5126,45 +5159,51 @@ impl Gles {
             Kind::Color(_) => (self.framebuffer(Some(other), None)?, self.framebuffer(Some(index), None)?, glow::COLOR_BUFFER_BIT),
             Kind::Depth(_) => (self.framebuffer(None, Some(other))?, self.framebuffer(None, Some(index))?, glow::DEPTH_BUFFER_BIT | glow::STENCIL_BUFFER_BIT),
         };
-        disturb();
-        let quarters = self.quarters as i64;
-        let gl = &self.gl;
-        // SAFETY: on the GL thread, every tile copied lies inside both
-        // surfaces
-        unsafe {
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(source));
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target));
-            gl.disable(glow::SCISSOR_TEST);
-            gl.color_mask(true, true, true, true);
-            gl.depth_mask(true);
-            gl.stencil_mask(0xFF);
-            // in the surfaces' pixels, whole for tiles at any scale
-            let up = |length: i64| (length * quarters / 4) as i32;
-            let blit = |(x, y): (i64, i64), (to_x, to_y): (i64, i64), (wide, high): (i64, i64)| {
-                gl.blit_framebuffer(
-                    up(x),
-                    up(other_height - y - high),
-                    up(x + wide),
-                    up(other_height - y),
-                    up(to_x),
-                    up(height - to_y - high),
-                    up(to_x + wide),
-                    up(height - to_y),
-                    mask,
-                    glow::NEAREST,
-                )
-            };
-            if across == other_across {
-                blit((0, start / across * 8), (0, (start - offset) / across * 8), (across * 8, (end - start) / across * 8));
-            } else {
-                let segment = across.min(other_across);
-                for at in (start..end).step_by(segment as usize) {
-                    let target = at - offset;
-                    blit((at % other_across * 8, at / other_across * 8), (target % across * 8, target / across * 8), (segment * 8, 8));
+        let (quarters, gl) = (self.quarters as i64, self.gl);
+        let textures = (self.surfaces[other].texture, self.surfaces[index].texture);
+        // from the GPU thread as well, the draws before it go first
+        self.worker.post_keeping(move || {
+            // what either was cleared to is in before tiles go over
+            flush_clears(Some(textures.0));
+            flush_clears(Some(textures.1));
+            disturb();
+            // SAFETY: on the GL thread, every tile copied lies inside both
+            // surfaces
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(source));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target));
+                gl.disable(glow::SCISSOR_TEST);
+                gl.color_mask(true, true, true, true);
+                gl.depth_mask(true);
+                gl.stencil_mask(0xFF);
+                // in the surfaces' pixels, whole for tiles at any scale
+                let up = |length: i64| (length * quarters / 4) as i32;
+                let blit = |(x, y): (i64, i64), (to_x, to_y): (i64, i64), (wide, high): (i64, i64)| {
+                    gl.blit_framebuffer(
+                        up(x),
+                        up(other_height - y - high),
+                        up(x + wide),
+                        up(other_height - y),
+                        up(to_x),
+                        up(height - to_y - high),
+                        up(to_x + wide),
+                        up(height - to_y),
+                        mask,
+                        glow::NEAREST,
+                    )
+                };
+                if across == other_across {
+                    blit((0, start / across * 8), (0, (start - offset) / across * 8), (across * 8, (end - start) / across * 8));
+                } else {
+                    let segment = across.min(other_across);
+                    for at in (start..end).step_by(segment as usize) {
+                        let target = at - offset;
+                        blit((at % other_across * 8, at / other_across * 8), (target % across * 8, target / across * 8), (segment * 8, 8));
+                    }
                 }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-        }
+        });
         let o = &mut self.surfaces[other];
         o.dirty = left;
         o.checked = false;
