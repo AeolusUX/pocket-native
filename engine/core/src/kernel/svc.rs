@@ -423,6 +423,11 @@ const YIELD_TICKS: u64 = 20_000;
 fn sleep_thread(system: &mut System) {
     let nanos = (system.cpu.regs[0] as u64) | ((system.cpu.regs[1] as u64) << 32);
     let tick = system.cpu.cycles;
+    // a negative time returns at once on the console, without yielding
+    if (nanos as i64) < 0 {
+        system.cpu.regs[0] = 0;
+        return;
+    }
     // a zero sleep is a yield, and while other threads are ready the
     // kernel runs them for a while even when their priority is lower,
     // titles polling a worker thread that way would spin forever otherwise
@@ -694,32 +699,33 @@ fn arbitrate_address(system: &mut System) {
 
     if kind == ArbitrationType::Signal {
         // wake up to value threads parked on this address, a negative value
-        // means all of them.
-        let mut woken = 0;
-        let unlimited = value < 0;
+        // means all of them. the console wakes the highest priority first,
+        // the one waiting longest among equals
+        let count = if value < 0 { usize::MAX } else { value as usize };
         let mut to_wake = Vec::new();
         let kernel = &mut system.kernel;
         let threads = &kernel.threads;
         if let Some(KObject::AddressArbiter(arbiter)) = kernel.objects.get_mut(object) {
+            // a thread whose wait timed out, or that ended since, left its
+            // entry behind, it goes without counting, a dead thread must
+            // never run again
             arbiter.waiters.retain(|&(thread, addr)| {
-                if addr != address {
-                    return true;
-                }
-                // a thread whose wait timed out, or that ended since, left its
-                // entry behind, it goes without counting, a dead thread must
-                // never run again
                 let parked = &threads[thread as usize];
-                if parked.status != ThreadStatus::WaitArbiter || parked.wait_address != Some(address) || to_wake.contains(&thread) {
-                    return false;
-                }
-                if unlimited || woken < value {
-                    woken += 1;
-                    to_wake.push(thread);
-                    false
-                } else {
-                    true
-                }
+                parked.status == ThreadStatus::WaitArbiter && parked.wait_address == Some(addr)
             });
+            while to_wake.len() < count {
+                let parked = arbiter.waiters.iter().enumerate().filter(|(_, &(_, addr))| addr == address);
+                let Some((next, _)) = parked.min_by_key(|(_, &(thread, _))| threads[thread as usize].priority) else {
+                    break;
+                };
+                to_wake.push(arbiter.waiters.remove(next).0);
+            }
+        }
+        // a signal that wakes nobody costs a thread of priority 50 or lower
+        // this long on the console, which keeps one spinning on it from
+        // starving the others
+        if to_wake.is_empty() && system.kernel.current().is_some_and(|thread| thread.priority >= 50) {
+            system.cpu.cycles += IDLE_SIGNAL_COST;
         }
         for thread in to_wake {
             let thread = system.kernel.thread_mut(thread);
@@ -964,6 +970,9 @@ fn get_system_tick(system: &mut System) {
 
 /// ticks between two svcGetSystemTick calls in a row on the console.
 const SYSTEM_TICK_COST: u64 = 150;
+
+/// ticks an arbiter signal that wakes nobody takes on the console.
+const IDLE_SIGNAL_COST: u64 = 1614;
 
 /// svcGetSystemInfo, r1 = type, r2 = parameter.
 fn get_system_info(system: &mut System) {

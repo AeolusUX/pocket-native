@@ -1704,6 +1704,52 @@ mod tests {
         assert_eq!(system.kernel.thread(parked).status, ThreadStatus::Ready);
     }
 
+    /// a signal for one waiter wakes the highest priority one even when a
+    /// lower one waited first, as the console does, and a signal that
+    /// wakes nobody costs a low priority thread time.
+    #[test]
+    fn an_arbiter_signal_wakes_the_highest_priority_first() {
+        let mut system = System::new(Config::default());
+        let low = system.kernel.create_thread("low", 0x0010_0000, 0x1000_0000, 0, 0x30, 0);
+        let high = system.kernel.create_thread("high", 0x0010_0000, 0x0FF0_0000, 0, 0x20, 0);
+        let signaller = system.kernel.create_thread("signaller", 0x0010_0000, 0x0FE0_0000, 0, 0x3F, 0);
+        for id in [low, high, signaller] {
+            system.map_tls_page(id);
+        }
+        system.kernel.schedule(&mut system.cpu, 0);
+        kernel::svc::dispatch(&mut system, 0x21);
+        let arbiter = system.cpu.regs[1];
+        let address = system.kernel.thread(low).tls + 0x100;
+        system.memory.write32(address, 0);
+        let arbitrate = |system: &mut System, who: ThreadId, kind: u32| {
+            system.kernel.current_thread = Some(who);
+            system.kernel.thread_mut(who).status = ThreadStatus::Running;
+            system.cpu.regs[..4].copy_from_slice(&[arbiter, address, kind, 1]);
+            kernel::svc::dispatch(system, 0x22);
+        };
+        arbitrate(&mut system, low, 1);
+        arbitrate(&mut system, high, 1);
+        arbitrate(&mut system, signaller, 0);
+        assert_eq!(system.kernel.thread(high).status, ThreadStatus::Ready);
+        assert_eq!(system.kernel.thread(low).status, ThreadStatus::WaitArbiter);
+        arbitrate(&mut system, signaller, 0);
+        assert_eq!(system.kernel.thread(low).status, ThreadStatus::Ready);
+        let before = system.cpu.cycles;
+        arbitrate(&mut system, signaller, 0);
+        assert_eq!(system.cpu.cycles - before, 1614);
+    }
+
+    /// a negative sleep returns at once, it must not sleep for good.
+    #[test]
+    fn a_negative_sleep_returns_at_once() {
+        let mut system = System::new(Config::default());
+        let id = one_spinning_thread(&mut system);
+        system.cpu.regs[0] = u32::MAX;
+        system.cpu.regs[1] = u32::MAX;
+        kernel::svc::dispatch(&mut system, 0x0A);
+        assert_eq!(system.kernel.thread(id).status, ThreadStatus::Running);
+    }
+
     #[test]
     fn timed_out_arbiter_waits_leave_one_entry_a_thread() {
         let mut system = System::new(Config::default());
