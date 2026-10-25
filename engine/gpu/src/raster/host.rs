@@ -36,6 +36,9 @@ pub(super) struct Draw<'a> {
     /// whether the fog is on, and its table.
     pub(super) fog: bool,
     pub(super) fog_table: &'a crate::fog::Table,
+    /// what the fragment registers' changes number, the same as the last
+    /// draw's while none changed.
+    pub(super) fragment_state: u64,
 }
 
 /// the triangles of a draw.

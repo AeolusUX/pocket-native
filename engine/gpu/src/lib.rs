@@ -1086,6 +1086,7 @@ impl Gpu {
                     self.resources.light_tables.write(&mut self.internal, burst);
                 }
                 if let Some(&last) = burst.last() {
+                    self.resources.fragment_state += (FRAGMENT[register] && self.internal[register] != last) as u64;
                     self.internal[register] = last;
                 }
                 index = end;
@@ -1384,6 +1385,7 @@ impl Gpu {
         let old = self.internal[register];
         let new = (old & !write_mask) | (value & write_mask);
         self.internal[register] = new;
+        self.resources.fragment_state += (new != old && FRAGMENT[register]) as u64;
         if ACTS[register] {
             self.act(memory, renderer, register, new);
         }
@@ -1478,6 +1480,20 @@ impl Gpu {
         }
     }
 }
+
+/// the registers the fragment stages' words come from, from the viewport's
+/// depth on to the lighting, short of the vertex stages' from 0x200, but for
+/// where the textures are, how big and in what format, which change from
+/// draw to draw and the words don't hold.
+const FRAGMENT: [bool; 0x300] = {
+    let mut fragment = [false; 0x300];
+    let mut register = 0x040;
+    while register < 0x200 {
+        fragment[register] = !matches!(register, 0x082 | 0x084..=0x08E | 0x092 | 0x094..=0x096 | 0x09A | 0x09C..=0x09E);
+        register += 1;
+    }
+    fragment
+};
 
 /// reads a command buffer as words.
 fn read_command_buffer<M: GpuMemory>(memory: &mut M, paddr: u32, size: u32, words: &mut Vec<u32>) {

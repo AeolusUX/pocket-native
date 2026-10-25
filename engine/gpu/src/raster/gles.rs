@@ -3767,6 +3767,8 @@ pub struct Gles {
     blank: glow::Texture,
     transfer: Option<glow::Program>,
     reinterpreter: Option<glow::Program>,
+    /// the last draw's colour words and program and what they came from.
+    fragment: Option<((u64, u32, [bool; 3], bool, bool, u64), Vec<u32>, glow::Program)>,
     upright: Option<glow::Program>,
     packers: Option<(glow::Program, glow::Program, glow::VertexArray)>,
     copiers: Option<([glow::Program; 3], glow::VertexArray)>,
@@ -3869,6 +3871,7 @@ impl Gles {
                 blank,
                 transfer: None,
                 reinterpreter: None,
+                fragment: None,
                 upright: None,
                 packers: None,
                 copiers: None,
@@ -6269,67 +6272,102 @@ impl Gles {
         };
 
         let worded = timed(19);
-        let mut words = WORDS.take(UNIFORM_WORDS);
-        for base in STAGE_REGISTERS {
-            words.extend([r[base], r[base + 1], r[base + 2], r[base + 3], r[base + 4], 0, 0, 0]);
-        }
-        let texture_config = (r[REG_TEXTURE_CONFIG] & !7) | enabled;
-        words.extend([r[REG_UPDATE_BUFFER], r[REG_BUFFER_COLOR], r[REG_ALPHA_TEST], texture_config]);
-        for (base, source) in TEXTURE_UNIT_BASES.into_iter().zip(sources) {
-            words.extend([r[base + 2], r[base], source.is_some() as u32, 0]);
-        }
-        let depth_flags = depth_map.w_buffer as u32 | (shaded as u32) << 1;
-        words.extend([depth_flags, draw.lighting.is_some() as u32, depth_map.scale.to_bits(), depth_map.offset.to_bits()]);
-        match draw.lighting {
-            Some(lighting) => lighting.pack(&mut words),
-            None => words.resize(UNIFORM_WORDS - PROCTEX_WORDS - COLOR_WORDS - FOG_WORDS, 0),
-        }
-        let base = proctex::REG_CONFIG;
-        words.extend([r[base], r[base + 1], r[base + 2], r[base + 3], r[base + 4], r[base + 5], 0, 0]);
-        words.extend(color_words(r));
-        words.extend([r[crate::fog::REG_COLOR], 0, 0, 0]);
-
-        let mut constants = [0u32; FRAGMENT_CONSTANTS];
-        for (i, base) in STAGE_REGISTERS.into_iter().enumerate() {
-            constants[i] = r[base] & 0x0FFF_0FFF;
-            constants[6 + i] = r[base + 1] & 0x0077_7FFF;
-            constants[12 + i] = r[base + 2] & 0x000F_000F;
-            constants[18 + i] = r[base + 4] & 0x0003_0003;
-        }
-        constants[24] = r[REG_UPDATE_BUFFER] & 0xFF00;
-        constants[25] = texture_config & 0x2707;
-        for (unit, (base, source)) in TEXTURE_UNIT_BASES.into_iter().zip(sources).enumerate() {
-            let config = r[base + 2];
-            let unbordered = enabled & 1 << unit != 0 && (config >> 8) & 3 != 1 && (config >> 12) & 3 != 1;
-            constants[25] |= (source.is_some() as u32) << (16 + unit) | (unbordered as u32) << (20 + unit);
-        }
-        constants[26] = draw.lighting.is_some() as u32;
-        constants[27] = r[REG_ALPHA_TEST] & 0x71 | unused_outputs(r);
-        constants[28] = depth_flags | if writes_depth { WRITES_DEPTH } else { 0 };
-        if self.generic {
-            constants = generic_constants(&constants);
-        }
-        static GENERIC_LIGHTING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let lighting = if draw.lighting.is_some() && !self.generic && !*GENERIC_LIGHTING.get_or_init(|| crate::switch("ZAKURO_GENERIC_LIGHTING", "generic lighting")) {
-            lighting_shape(&words)
+        // most draws' fragment registers are the last one's, as they stay set
+        // on the console until a list changes them, and so are the words
+        static CHECK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let check = *CHECK.get_or_init(|| crate::switch("ZAKURO_CHECK_REUSE", "reused colour words checked"));
+        let key = (draw.fragment_state, enabled, sources.map(|source| source.is_some()), shaded, writes_depth, vertex);
+        let same = self.fragment.as_ref().is_some_and(|(last, ..)| *last == key);
+        let (words, program) = if same && !check {
+            let (_, last, program) = self.fragment.as_ref().expect("the last draw's");
+            let mut words = WORDS.take(UNIFORM_WORDS);
+            words.extend_from_slice(last);
+            (words, *program)
         } else {
-            Vec::new()
-        };
-        let program = match self.program(&constants, writes_depth, &lighting, vertex, false) {
-            Ok(Some(program)) => program,
-            // shaded on the CPU meanwhile
-            Ok(None) if vertex != 0 => return Err(COMPILING.to_owned()),
-            Ok(None) => self.program(&generic_constants(&constants), writes_depth, &[], 0, true)?.ok_or("no generic program")?,
-            Err(error) => {
-                if vertex != 0 {
-                    for translation in self.translated.values_mut() {
-                        if *translation == Some(vertex) {
-                            *translation = None;
+            let mut words = WORDS.take(UNIFORM_WORDS);
+            for base in STAGE_REGISTERS {
+                words.extend([r[base], r[base + 1], r[base + 2], r[base + 3], r[base + 4], 0, 0, 0]);
+            }
+            let texture_config = (r[REG_TEXTURE_CONFIG] & !7) | enabled;
+            words.extend([r[REG_UPDATE_BUFFER], r[REG_BUFFER_COLOR], r[REG_ALPHA_TEST], texture_config]);
+            for (base, source) in TEXTURE_UNIT_BASES.into_iter().zip(sources) {
+                words.extend([r[base + 2], r[base], source.is_some() as u32, 0]);
+            }
+            let depth_flags = depth_map.w_buffer as u32 | (shaded as u32) << 1;
+            words.extend([depth_flags, draw.lighting.is_some() as u32, depth_map.scale.to_bits(), depth_map.offset.to_bits()]);
+            match draw.lighting {
+                Some(lighting) => lighting.pack(&mut words),
+                None => words.resize(UNIFORM_WORDS - PROCTEX_WORDS - COLOR_WORDS - FOG_WORDS, 0),
+            }
+            let base = proctex::REG_CONFIG;
+            words.extend([r[base], r[base + 1], r[base + 2], r[base + 3], r[base + 4], r[base + 5], 0, 0]);
+            words.extend(color_words(r));
+            words.extend([r[crate::fog::REG_COLOR], 0, 0, 0]);
+
+            let mut constants = [0u32; FRAGMENT_CONSTANTS];
+            for (i, base) in STAGE_REGISTERS.into_iter().enumerate() {
+                constants[i] = r[base] & 0x0FFF_0FFF;
+                constants[6 + i] = r[base + 1] & 0x0077_7FFF;
+                constants[12 + i] = r[base + 2] & 0x000F_000F;
+                constants[18 + i] = r[base + 4] & 0x0003_0003;
+            }
+            constants[24] = r[REG_UPDATE_BUFFER] & 0xFF00;
+            constants[25] = texture_config & 0x2707;
+            for (unit, (base, source)) in TEXTURE_UNIT_BASES.into_iter().zip(sources).enumerate() {
+                let config = r[base + 2];
+                let unbordered = enabled & 1 << unit != 0 && (config >> 8) & 3 != 1 && (config >> 12) & 3 != 1;
+                constants[25] |= (source.is_some() as u32) << (16 + unit) | (unbordered as u32) << (20 + unit);
+            }
+            constants[26] = draw.lighting.is_some() as u32;
+            constants[27] = r[REG_ALPHA_TEST] & 0x71 | unused_outputs(r);
+            constants[28] = depth_flags | if writes_depth { WRITES_DEPTH } else { 0 };
+            if self.generic {
+                constants = generic_constants(&constants);
+            }
+            static GENERIC_LIGHTING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let lighting = if draw.lighting.is_some() && !self.generic && !*GENERIC_LIGHTING.get_or_init(|| crate::switch("ZAKURO_GENERIC_LIGHTING", "generic lighting")) {
+                lighting_shape(&words)
+            } else {
+                Vec::new()
+            };
+            let mut exact = true;
+            let program = match self.program(&constants, writes_depth, &lighting, vertex, false) {
+                Ok(Some(program)) => program,
+                // shaded on the CPU meanwhile
+                Ok(None) if vertex != 0 => return Err(COMPILING.to_owned()),
+                Ok(None) => {
+                    exact = false;
+                    self.program(&generic_constants(&constants), writes_depth, &[], 0, true)?.ok_or("no generic program")?
+                }
+                Err(error) => {
+                    if vertex != 0 {
+                        for translation in self.translated.values_mut() {
+                            if *translation == Some(vertex) {
+                                *translation = None;
+                            }
                         }
                     }
+                    return Err(error);
                 }
-                return Err(error);
+            };
+            if same {
+                let (_, last, last_program) = self.fragment.as_ref().expect("the last draw's");
+                if *last != words || *last_program != program {
+                    let changed: Vec<usize> = (0..words.len()).filter(|&i| last.get(i) != words.get(i)).collect();
+                    log::warn!("reused colour words differ at {changed:?}, program the same {}", *last_program == program);
+                }
             }
+            if exact {
+                match &mut self.fragment {
+                    Some((last_key, last, last_program)) => {
+                        (*last_key, *last_program) = (key, program);
+                        last.clear();
+                        last.extend_from_slice(&words);
+                    }
+                    None => self.fragment = Some((key, words.to_vec(), program)),
+                }
+            }
+            (words, program)
         };
 
         drop(worded);

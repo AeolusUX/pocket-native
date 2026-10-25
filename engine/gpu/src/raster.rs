@@ -768,6 +768,9 @@ pub struct Resources {
     pub light_tables: Tables,
     pub proctex_tables: crate::proctex::Tables,
     pub fog_table: crate::fog::Table,
+    /// counts changes to the registers the fragment stages read, a draw's
+    /// colour words and program stay the last one's while it holds.
+    pub(crate) fragment_state: u64,
     /// the host GPU, when draws go to it rather than to the software path.
     #[cfg(feature = "gles")]
     pub(crate) hardware: Option<HostRenderer>,
@@ -1593,6 +1596,7 @@ struct DrawState<'a> {
     /// the fog, when its mode mixes it in, and its table.
     fog: Option<crate::fog::Fog<'a>>,
     fog_table: &'a crate::fog::Table,
+    fragment_state: u64,
 }
 
 #[cfg(feature = "gles")]
@@ -1617,6 +1621,7 @@ impl DrawState<'_> {
             proctex_tables: self.proctex_tables,
             fog: self.fog.is_some(),
             fog_table: self.fog_table,
+            fragment_state: self.fragment_state,
         }
     }
 }
@@ -2232,6 +2237,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
         proctex_tables: &resources.proctex_tables,
         fog: crate::fog::Fog::read(registers, &resources.fog_table),
         fog_table: &resources.fog_table,
+        fragment_state: resources.fragment_state,
     };
     // what the draw writes, which the textures of later draws in the list
     // may be
