@@ -6561,19 +6561,24 @@ impl Gles {
     fn shading_bytes(shading: &Shading, depth_map: DepthMap) -> (Vec<u32>, Vec<u8>, usize) {
         let unit = shading.unit;
         let read = unit.inputs_read();
-        let registers: Vec<usize> = (0..INPUT_REGISTERS).filter(|r| read & (1 << r) != 0).collect();
+        let registers = || (0..INPUT_REGISTERS).filter(move |r| read & (1 << r) != 0);
+        let count = registers().count();
         let mut words = WORDS.take(452);
         words.extend(unit.float_uniforms.iter().flatten().map(|value| value.to_bits()));
         for [count, start, step, _] in unit.int_uniforms {
             words.extend([count as u32, start as u32, step as i8 as u32, 0]);
         }
-        words.extend([unit.bool_uniforms as u32, unit.entry_point, registers.len() as u32, 0]);
+        words.extend([unit.bool_uniforms as u32, unit.entry_point, count as u32, 0]);
         words.extend([depth_map.scale.to_bits(), depth_map.offset.to_bits(), 0, 0]);
         let (x, y, width, height) = shading.viewport;
         words.extend([x, y, width, height].map(f32::to_bits));
-        let mut inputs = BYTES.take((shading.inputs.len() * registers.len()).max(1) * 16);
+        // the vertices the GPU fetches itself have no inputs to pack
+        if shading.fetched.is_some() {
+            return (words, Vec::new(), count);
+        }
+        let mut inputs = BYTES.take((shading.inputs.len() * count).max(1) * 16);
         for input in shading.inputs {
-            for &register in &registers {
+            for register in registers() {
                 for value in input[register] {
                     inputs.extend_from_slice(&value.to_le_bytes());
                 }
@@ -6582,7 +6587,7 @@ impl Gles {
         if inputs.is_empty() {
             inputs.resize(16, 0);
         }
-        (words, inputs, registers.len())
+        (words, inputs, count)
     }
 }
 
