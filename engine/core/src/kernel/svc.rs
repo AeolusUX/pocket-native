@@ -458,8 +458,11 @@ fn set_thread_priority(system: &mut System) {
     let priority = system.cpu.regs[1];
     match resolve_thread(system, handle) {
         Some(id) => {
-            system.kernel.thread_mut(id).priority = priority.min(super::LOWEST_PRIORITY);
+            let thread = system.kernel.thread_mut(id);
+            thread.base_priority = priority.min(super::LOWEST_PRIORITY);
+            thread.priority = thread.base_priority;
             system.kernel.reschedule_pending = true;
+            system.kernel.priorities_stale = true;
             system.cpu.regs[0] = 0;
         }
         None => system.cpu.regs[0] = invalid_handle(system, handle, "svcSetThreadPriority"),
@@ -514,11 +517,18 @@ fn release_mutex(system: &mut System) {
         system.cpu.regs[0] = invalid_handle(system, handle, "svcReleaseMutex");
         return;
     };
+    let current = system.kernel.current_thread;
     if let Some(KObject::Mutex(mutex)) = system.kernel.objects.get_mut(object) {
+        // only the thread holding it can let it go
+        if mutex.owner.is_none() || mutex.owner != current {
+            system.cpu.regs[0] = NOT_MUTEX_OWNER;
+            return;
+        }
         mutex.lock_count = mutex.lock_count.saturating_sub(1);
         if mutex.lock_count == 0 {
             mutex.owner = None;
             system.kernel.reschedule_pending = true;
+            system.kernel.priorities_stale = true;
         }
         system.cpu.regs[0] = 0;
     } else {
@@ -973,6 +983,9 @@ const SYSTEM_TICK_COST: u64 = 150;
 
 /// ticks an arbiter signal that wakes nobody takes on the console.
 const IDLE_SIGNAL_COST: u64 = 1614;
+
+/// what releasing a mutex another thread holds gives.
+const NOT_MUTEX_OWNER: u32 = 0xD8E0_041F;
 
 /// svcGetSystemInfo, r1 = type, r2 = parameter.
 fn get_system_info(system: &mut System) {

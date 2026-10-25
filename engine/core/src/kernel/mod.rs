@@ -55,6 +55,9 @@ pub struct Kernel {
     /// flips while a thread starves the ones below it, handing every other
     /// slice to them.
     relief: bool,
+    /// a thread began or stopped waiting, or a mutex changed hands, so the
+    /// priorities lent have to be worked out again.
+    priorities_stale: bool,
 
     /// cached objects backing the pseudo-handles, so that duplicating
     /// CUR_THREAD_HANDLE twice yields the same object.
@@ -88,6 +91,7 @@ impl Kernel {
             reschedule_pending: false,
             all_blocked: false,
             relief: false,
+            priorities_stale: false,
             thread_objects: std::collections::HashMap::new(),
             process_object: None,
             timers: Vec::new(),
@@ -209,6 +213,9 @@ impl Kernel {
             self.try_satisfy_wait(id, tick);
         }
         self.live = live;
+        if std::mem::take(&mut self.priorities_stale) {
+            self.lend_priorities();
+        }
         for id in std::mem::take(&mut self.pulsed) {
             match self.objects.get_mut(id) {
                 Some(KObject::Event(event)) => event.signaled = false,
@@ -486,6 +493,7 @@ impl Kernel {
             Some(KObject::Mutex(mutex)) => {
                 mutex.owner = Some(waiter);
                 mutex.lock_count += 1;
+                self.priorities_stale = true;
             }
             _ => {}
         }
@@ -512,6 +520,41 @@ impl Kernel {
         thread.wait_result = None;
         thread.status = ThreadStatus::WaitSync;
         self.reschedule_pending = true;
+        self.priorities_stale = true;
+    }
+
+    /// a thread holding a mutex runs at the priority of the most urgent
+    /// thread waiting on it when that is higher than its own, as on the
+    /// console, so a low priority thread holding a lock a high one waits on
+    /// gets the core to give it back. lent on along a chain of holders that
+    /// wait in turn.
+    fn lend_priorities(&mut self) {
+        for &id in &self.live {
+            let thread = &mut self.threads[id as usize];
+            thread.priority = thread.base_priority;
+        }
+        loop {
+            let lent: Vec<(ThreadId, u32)> = self
+                .live
+                .iter()
+                .map(|&id| &self.threads[id as usize])
+                .filter(|waiter| waiter.status == ThreadStatus::WaitSync)
+                .flat_map(|waiter| {
+                    waiter.wait_objects.iter().filter_map(|&object| match self.objects.get(object) {
+                        Some(KObject::Mutex(mutex)) => mutex.owner.map(|owner| (owner, waiter.priority)),
+                        _ => None,
+                    })
+                })
+                .filter(|&(owner, priority)| self.threads[owner as usize].priority > priority)
+                .collect();
+            if lent.is_empty() {
+                return;
+            }
+            for (owner, priority) in lent {
+                let thread = &mut self.threads[owner as usize];
+                thread.priority = thread.priority.min(priority);
+            }
+        }
     }
 
     /// ends a thread's wait, letting go of the objects it kept while it
@@ -521,6 +564,7 @@ impl Kernel {
             self.objects.release(object);
         }
         self.threads[id as usize].clear_wait();
+        self.priorities_stale = true;
     }
 
     /// whether a thread besides the current one could run.
@@ -722,5 +766,36 @@ mod tests {
         assert!(matches!(thread.wait_result, Some(WaitResult::Signaled(0))));
         let Some(KObject::Mutex(mutex)) = kernel.objects.get(object) else { panic!("the mutex is gone") };
         assert_eq!((mutex.owner, mutex.lock_count), (Some(waiter), 1));
+    }
+    /// a low priority thread holding a mutex a high one waits on runs at the
+    /// high one's priority, ahead of a middle one that is ready, and goes
+    /// back to its own once it lets go, as on the console.
+    #[test]
+    fn a_mutex_holder_runs_at_its_waiters_priority() {
+        let mut kernel = Kernel::new(0, MemoryRegion::Application, 0x1400_0000);
+        let low = kernel.create_thread("low", 0x0010_0000, 0x1000_0000, 0, 0x30, 0);
+        let middle = kernel.create_thread("middle", 0x0010_0000, 0x0FF0_0000, 0, 0x28, 0);
+        let high = kernel.create_thread("high", 0x0010_0000, 0x0FE0_0000, 0, 0x20, 0);
+        let mut mutex = sync::Mutex::new("Mutex");
+        mutex.owner = Some(low);
+        mutex.lock_count = 1;
+        let object = kernel.objects.insert(KObject::Mutex(mutex));
+        kernel.objects.add_ref(object);
+        kernel.current_thread = Some(high);
+        kernel.begin_wait(vec![object], false, None, 0);
+        kernel.current_thread = None;
+        let mut cpu = Cpu::new();
+        kernel.schedule(&mut cpu, 0);
+        assert_eq!(kernel.thread(low).priority, 0x20);
+        assert_eq!(kernel.current_thread, Some(low));
+        assert_eq!(kernel.thread(middle).status, ThreadStatus::Ready);
+
+        let Some(KObject::Mutex(mutex)) = kernel.objects.get_mut(object) else { panic!("the mutex is gone") };
+        mutex.owner = None;
+        mutex.lock_count = 0;
+        kernel.priorities_stale = true;
+        kernel.schedule(&mut cpu, 1);
+        assert_eq!(kernel.thread(low).priority, 0x30);
+        assert_eq!(kernel.current_thread, Some(high));
     }
 }
