@@ -4745,9 +4745,11 @@ impl Gles {
 
     /// a display transfer whose input starts with rows nothing drew and
     /// goes on into a drawing to its end, as Fire Emblem Awakening shrinks
-    /// its picture for an effect: the rows from memory and the drawing each
-    /// go through the transfer on the GPU, into their parts of the output,
-    /// rather than the drawing being read back for the CPU.
+    /// its picture for an effect, or goes on past a drawing into rows nothing
+    /// drew, as Metroid Samus Returns shrinks its 400 rows as 512: the rows
+    /// from memory and the drawing each go through the transfer on the GPU,
+    /// into their parts of the output, rather than the drawing being read
+    /// back for the CPU.
     fn transfer_below_memory<M: GpuMemory>(&mut self, memory: &mut M, t: &Transfer) -> Result<bool, String> {
         // above the console's resolution this stays with the CPU for now
         if self.scaled() || t.flip || t.input_linear || t.column != 0 {
@@ -4756,32 +4758,40 @@ impl Gles {
         let (input_kind, output_kind) = (Kind::Color(t.input_format), Kind::Color(t.output_format));
         let tile_rows = 8 * t.input_width * input_kind.bytes();
         let rows = t.copy.1 * t.scale.1;
-        let Some((addr, size, lead)) = self.surfaces.iter().find_map(|s| {
-            let offset = s.addr.checked_sub(t.input).filter(|&offset| offset > 0 && offset % tile_rows == 0)?;
-            let lead = offset / tile_rows * 8;
-            let fits = s.kind == input_kind && s.tiled && s.width == t.input_width && s.dirty.is_some() && lead < rows && lead.is_multiple_of(t.scale.1) && rows <= lead + s.height;
-            fits.then_some((s.addr, (s.width, s.height), lead))
+        // the drawing, its size, and the rows of memory before or after it
+        let Some((addr, size, lead, before)) = self.surfaces.iter().find_map(|s| {
+            if s.kind != input_kind || !s.tiled || s.width != t.input_width || s.dirty.is_none() {
+                return None;
+            }
+            match s.addr.checked_sub(t.input).filter(|&offset| offset % tile_rows == 0) {
+                Some(0) => (s.height < rows && s.height % 8 == 0 && s.height.is_multiple_of(t.scale.1)).then_some((s.addr, (s.width, s.height), rows - s.height, false)),
+                Some(offset) => {
+                    let lead = offset / tile_rows * 8;
+                    (lead < rows && lead.is_multiple_of(t.scale.1) && rows <= lead + s.height).then_some((s.addr, (s.width, s.height), lead, true))
+                }
+                None => None,
+            }
         }) else {
             return Ok(false);
         };
-        // the rows before the drawing come from memory as they are, which
-        // another drawing there would make a read back again
-        let lead_bytes = lead / 8 * tile_rows;
-        if self.surfaces.iter().any(|s| s.dirty_overlaps(t.input, lead_bytes)) {
+        // the rows of memory come as they are, which another drawing there
+        // would make a read back again
+        let rest = if before { t.input } else { addr + size.1 / 8 * tile_rows };
+        if self.surfaces.iter().any(|s| s.dirty_overlaps(rest, lead / 8 * tile_rows)) {
             return Ok(false);
         }
-        let input_end = addr as u64 + (size.0 * size.1 * input_kind.bytes()) as u64;
+        let input_end = (t.input as u64 + (rows.div_ceil(8) * tile_rows) as u64).max(addr as u64 + (size.0 * size.1 * input_kind.bytes()) as u64);
         let output_end = t.output as u64 + (t.output_width * t.output_height * output_kind.bytes()) as u64;
         if (t.input as u64) < output_end && (t.output as u64) < input_end {
             return Ok(false);
         }
         self.current()?;
-        let (before, drawing, target) = loop {
-            let before = self.surface_rows(memory, t.input, (t.input_width, lead), input_kind, true, None)?;
+        let (memory_rows, drawing, target) = loop {
+            let memory_rows = self.surface_rows(memory, rest, (t.input_width, lead), input_kind, true, None)?;
             let drawing = self.surface_rows(memory, addr, size, input_kind, true, None)?;
             let target = self.surface_rows(memory, t.output, (t.output_width, t.output_height), output_kind, t.output_tiled, None)?;
-            if [before, drawing, target].iter().all(|&i| self.surfaces[i].checked) {
-                break (before, drawing, target);
+            if [memory_rows, drawing, target].iter().all(|&i| self.surfaces[i].checked) {
+                break (memory_rows, drawing, target);
             }
         };
         let program = match self.transfer {
@@ -4795,13 +4805,12 @@ impl Gles {
         };
         let gl = self.gl;
         let t = t.clone();
-        let split = lead / t.scale.1;
         // each part: its source, the source's height, and the output rows
         // it fills, from and how many
-        let parts = [
-            (self.surfaces[before].texture, lead, 0, split),
-            (self.surfaces[drawing].texture, size.1, split, t.copy.1 - split),
-        ];
+        let (memory_rows, drawing) = ((self.surfaces[memory_rows].texture, lead), (self.surfaces[drawing].texture, size.1));
+        let [(a, a_height), (b, b_height)] = if before { [memory_rows, drawing] } else { [drawing, memory_rows] };
+        let split = a_height / t.scale.1;
+        let parts = [(a, a_height, 0, split), (b, b_height, split, t.copy.1 - split)];
         let target_texture = self.surfaces[target].texture;
         self.worker.post(move || unsafe {
             disturb();
@@ -6664,6 +6673,13 @@ mod tests {
 
     #[test]
     fn a_shrinking_transfer_from_memory_into_a_drawing_matches_the_console() {
+        // memory first, as Fire Emblem Awakening's, or the drawing first, as
+        // Metroid Samus Returns'
+        shrinking_transfer(false);
+        shrinking_transfer(true);
+    }
+
+    fn shrinking_transfer(drawing_first: bool) {
         let mut gles = match Gles::new() {
             Ok(gles) => gles,
             Err(error) => {
@@ -6679,7 +6695,7 @@ mod tests {
             *byte = (i * 37 + i / 5) as u8;
         }
         // the drawing starts two rows of tiles in, as Fire Emblem Awakening's
-        let drawing = input + lead / 8 * 8 * width * 4;
+        let drawing = if drawing_first { input } else { input + lead / 8 * 8 * width * 4 };
         let index = gles.surface_rows(&mut memory, drawing, (width, drawn), Kind::Color(format), true, None).unwrap();
         gles.surfaces[index].drew((0, drawn));
         let (out_width, out_height) = (width / 2, (lead + drawn) / 2);
@@ -6718,7 +6734,7 @@ mod tests {
         // the drawing stayed on the GPU, nothing read it back
         assert!(gles.surfaces.iter().any(|s| s.addr == drawing && s.dirty.is_some()));
         gles.flush(&mut memory).unwrap();
-        assert_eq!(&memory.0[output as usize..output as usize + expected.len()], &expected[..]);
+        assert_eq!(&memory.0[output as usize..output as usize + expected.len()], &expected[..], "drawing first {drawing_first}");
     }
 
     #[test]
