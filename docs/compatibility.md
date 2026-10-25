@@ -52,7 +52,7 @@ isn't counted against any game here.
 | Mario Kart 7 | Playable | R36S, PC | Tuned on the US version. Races run well once a track's shaders are built, the first race on a track stutters. Some testers report it slower than that |
 | Metroid: Samus Returns | Starts | R36S, PC | The intro plays into the game. The black frames between its intro pictures are the game's own fades |
 | Monster Hunter 4 Ultimate | Slow | Reported: RX6H, 0.2 | 6 fps on the defaults. Its profile now turns on **Real-time GPU**, which a tester found faster |
-| New Super Mario Bros. 2 | Playable | PC, reported: 0.2.5 | Close to fully playable on 0.2.5 (European version). One report of a crash after turning down StreetPass setup |
+| New Super Mario Bros. 2 | Playable | PC, reported: 0.2.5 | Close to fully playable on 0.2.5 (European version). The Special Edition crashed on 0.4.0 when turning SpotPass off, which the next version fixes |
 | Paper Mario: Sticker Star | Starts | PC | The opening plays, but it keeps the 3DS's CPU all but fully busy, so expect it to be slow on a handheld |
 | Pokémon Omega Ruby and Alpha Sapphire | Plays well | R36S, PC, reported: RG40XXV, RX6H | Close to 30 fps in towns, routes and battles on the R36S. Options for the outlines, battle shading and the battle menu under **This game** |
 | Pokémon Sun and Moon | Playable | R36S, R36S sim, PC | Moon: 25 to 29 fps on Route 1 and in Iki Town in the R36S sim. The first start takes a long time. Sun gets through its intro to the name entry on the PC and should match Moon, not played yet |
@@ -62,6 +62,7 @@ isn't counted against any game here.
 | Shin Megami Tensei IV | Playable | Reported: RX6H, 0.2 | Slows down at times |
 | Shin Megami Tensei: Strange Journey Redux | Playable | Reported: RX6H, 0.2 | Slows down at times |
 | Sonic Generations | Slow | Reported: R36S clone, 0.2 | Very slow |
+| Sonic Lost World | Playable | Reported: R36S | A steady frame rate once its shaders are built, tried through Windy Hill's tutorial and first act |
 | Super Mario 3D Land | Playable | Reported: several, 0.2 | Some textures flicker. Sometimes crashed at the start before 0.2.5 |
 | Super Smash Bros. for Nintendo 3DS | Slow | R36S, PC | Menus are fine. Matches run around half speed on the R36S on busy stages |
 | Yoshi's New Island | Playable | Reported: 0.2 | Hold L2 and use the right stick for the parts you tilt the console in |
