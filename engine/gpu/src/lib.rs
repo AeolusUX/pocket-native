@@ -5,6 +5,7 @@ pub mod blend;
 pub mod fog;
 pub mod proctex;
 pub mod format;
+pub mod journal;
 pub mod lighting;
 pub mod raster;
 pub mod registers;
@@ -539,6 +540,7 @@ impl Gpu {
         }
         let length = (end - start) as usize;
         let address = memory.translate(start);
+        journal::note(address, length as u32);
         #[cfg(feature = "gles")]
         if let Some(hardware) = self.resources.hardware.as_mut() {
             if let Err(error) = hardware.before_fill(memory, address, length as u32, if matches!(width, 2 | 3) { width } else { 4 }) {

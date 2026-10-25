@@ -275,6 +275,10 @@ const TEXTURE_KEEP_FLUSHES: u64 = 600;
 const SURFACE_KEEP_FLUSHES: u64 = 600;
 const RETIRE_EVERY: u64 = 60;
 
+/// batches a surface's memory goes without being compared with its shadow
+/// while the journal says nothing wrote there.
+const SURFACE_TRUSTED_FLUSHES: u64 = 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Color(ColorFormat),
@@ -308,6 +312,9 @@ struct Surface {
     stale: bool,
     /// the batch it was last drawn into or read in.
     used: u64,
+    /// the journal's stamp when memory was last found to hold the shadow,
+    /// and the batch that was in.
+    matched: (u64, u64),
 }
 
 static VERSIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -4819,6 +4826,16 @@ impl Gles {
                 let (from, to) = rows.map_or((addr, size), |(start, end)| (addr + start * row, (end - start) * row));
                 let others = (0..self.surfaces.len()).any(|i| i != index && self.surfaces[i].dirty_overlaps(from, to));
                 if !others {
+                    // memory nothing wrote over since it held the shadow
+                    // still does, it is compared again now and then all the
+                    // same in case a write went past the journal
+                    let (stamp, batch) = self.surfaces[index].matched;
+                    let (written, now) = crate::journal::written_since(stamp, from, to);
+                    if written == crate::journal::Written::Nothing && self.flushes - batch < SURFACE_TRUSTED_FLUSHES {
+                        let surface = &mut self.surfaces[index];
+                        (surface.checked, surface.stale, surface.matched.0) = (true, false, now);
+                        return Ok(index);
+                    }
                     let same = match memory.slice(addr, size as usize) {
                         Some(bytes) => same(bytes, &self.surfaces[index].shadow),
                         None => {
@@ -4828,8 +4845,9 @@ impl Gles {
                         }
                     };
                     if same {
-                        self.surfaces[index].checked = true;
-                        self.surfaces[index].stale = false;
+                        let flushes = self.flushes;
+                        let surface = &mut self.surfaces[index];
+                        (surface.checked, surface.stale, surface.matched) = (true, false, (now, flushes));
                         return Ok(index);
                     }
                 }
@@ -4872,6 +4890,7 @@ impl Gles {
                     version: next_version(),
                     stale: false,
                     used: self.flushes,
+                    matched: (0, 0),
                 });
                 self.surfaces.len() - 1
             }

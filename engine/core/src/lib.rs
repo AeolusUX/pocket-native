@@ -212,7 +212,7 @@ impl System {
         }
         System {
             cpu: Cpu::new(),
-            memory: Memory::new(config.new3ds, app_bytes),
+            memory: Memory::new(config.new3ds, app_bytes).with_linear_base(linear_heap_base(config.new3ds)),
             kernel: Kernel::new(0, memory::MemoryRegion::Application, linear_heap_base(config.new3ds)),
             services,
             gpu: Gpu::new(),

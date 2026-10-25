@@ -479,12 +479,23 @@ fn fetch_arrays<M: GpuMemory>(
                         let start = memory.translate(base + loader.offset + first * loader.stride);
                         let len = ((last - first) * loader.stride + loader.size) as usize;
                         let fast = crate::fast_with(crate::speedup::MESHES);
-                        let bytes = match meshes.arrays.get(&(start, len)).map(|(checked, bytes)| (*checked, bytes.clone())) {
-                            Some((checked, bytes)) if fast && meshes.trusted(start, checked, list) => bytes,
+                        let stamp = crate::journal::now();
+                        let cached = meshes.arrays.get(&(start, len)).map(|(checked, bytes)| (*checked, bytes.clone()));
+                        let trusted = match cached {
+                            Some((checked, _)) if fast => meshes.trusted(start, len as u32, checked, list),
+                            _ => None,
+                        };
+                        let bytes = match cached {
+                            Some((_, bytes)) if trusted.is_some() => {
+                                if let Some((checked, _)) = meshes.arrays.get_mut(&(start, len)) {
+                                    *checked = trusted.unwrap();
+                                }
+                                bytes
+                            }
                             // the same bytes keep the same array, which the GPU
                             // keeps a copy of
                             Some((_, bytes)) if fast && memory.slice(start, len)? == &bytes[..] => {
-                                meshes.arrays.insert((start, len), (list, bytes.clone()));
+                                meshes.arrays.insert((start, len), ((list, stamp, false), bytes.clone()));
                                 bytes
                             }
                             found => {
@@ -494,7 +505,7 @@ fn fetch_arrays<M: GpuMemory>(
                                         meshes.found_changed(start, list);
                                     }
                                     meshes.make_room(len);
-                                    meshes.arrays.insert((start, len), (list, bytes.clone()));
+                                    meshes.arrays.insert((start, len), ((list, stamp, false), bytes.clone()));
                                 }
                                 bytes
                             }
@@ -769,23 +780,44 @@ pub struct Resources {
 struct MeshCache {
     /// the indices, their range, the indices counted from the lowest, and
     /// those as the bytes a GPU reads, 16 bits each where they fit.
-    indices: rustc_hash::FxHashMap<(u32, u32, bool), (u64, Arc<[u32]>, (u32, u32), Arc<[u32]>, Arc<[u8]>)>,
-    arrays: rustc_hash::FxHashMap<(u32, usize), (u64, Arc<[u8]>)>,
+    indices: rustc_hash::FxHashMap<(u32, u32, bool), (Checked, Arc<[u32]>, (u32, u32), Arc<[u32]>, Arc<[u8]>)>,
+    arrays: rustc_hash::FxHashMap<(u32, usize), (Checked, Arc<[u8]>)>,
     bytes: usize,
     /// meshes found changed, by address, and the list they were found in.
     changed: rustc_hash::FxHashMap<u32, u64>,
 }
 
-/// how many command lists a mesh is trusted for.
-const MESH_TRUSTED_LISTS: u64 = 64;
+/// the list a mesh was read in, the journal's stamp when it was last
+/// checked, and whether a flush of everything went over it since it was
+/// read.
+type Checked = (u64, u64, bool);
+
+/// how many command lists a mesh nothing wrote over is trusted for, and
+/// one only a flush of everything went over.
+const MESH_TRUSTED_LISTS: u64 = 600;
+const MESH_FLUSHED_LISTS: u64 = 64;
 /// how many bytes of meshes are kept before the cache starts over.
 const MESH_BYTES: usize = 32 << 20;
 /// how many command lists a changed mesh stays untrusted.
 const MESH_DOUBTED_LISTS: u64 = 1024;
 
 impl MeshCache {
-    fn trusted(&self, addr: u32, checked: u64, list: u64) -> bool {
-        list - checked < MESH_TRUSTED_LISTS && self.changed.get(&addr).is_none_or(|&at| list - at >= MESH_DOUBTED_LISTS)
+    /// the journal's stamp of now when a mesh read in the list and at the
+    /// stamp of checked is still what it was: nothing wrote over it since,
+    /// it was read in the last few hundred lists and is not one found
+    /// changed lately.
+    fn trusted(&self, addr: u32, len: u32, (checked, stamp, flushed): Checked, list: u64) -> Option<Checked> {
+        if list - checked >= MESH_TRUSTED_LISTS || self.changed.get(&addr).is_some_and(|&at| list - at < MESH_DOUBTED_LISTS) {
+            return None;
+        }
+        let (written, now) = crate::journal::written_since(stamp, addr, len);
+        let flushed = flushed || written == crate::journal::Written::Everything;
+        let lists = match (written, flushed) {
+            (crate::journal::Written::Something, _) => 0,
+            (_, true) => MESH_FLUSHED_LISTS,
+            (_, false) => MESH_TRUSTED_LISTS,
+        };
+        (list - checked < lists).then_some((checked, now, flushed))
     }
 
     fn found_changed(&mut self, addr: u32, list: u64) {
@@ -813,11 +845,11 @@ pub struct TextureCache {
     /// by address, format and size.
     entries: rustc_hash::FxHashMap<TextureKey, Decoded>,
     texels: usize,
-    /// counts command lists. nothing but drawing changes memory while one
-    /// runs, so a texture checked during it is not checked again unless a
-    /// draw writes over it.
+    /// counts command lists.
     list: u64,
-    /// where the draws of this list wrote, as address and length.
+    /// where the draws of this list wrote, as address and length. draws
+    /// leave memory as it was, but the software path writes what it drew
+    /// there when the list ends.
     written: Vec<(u32, u32)>,
 }
 
@@ -828,9 +860,10 @@ struct Decoded {
     hash: u64,
     texels: Arc<[[u8; 4]]>,
     etc1: Option<Arc<[u8]>>,
-    /// the list it was last checked in, and how many writes that list had
-    /// made by then.
-    checked: (u64, usize),
+    /// the list it was last read in, how many writes that list had made by
+    /// then, the journal's stamp when it was last checked, and whether a
+    /// flush of everything went over it since it was read.
+    checked: (u64, usize, u64, bool),
 }
 
 /// set by a renderer whose GPU samples ETC1 itself.
@@ -839,8 +872,13 @@ pub(crate) static SAMPLES_ETC1: std::sync::atomic::AtomicBool = std::sync::atomi
 /// how many texels the cache holds before it starts over, 256 MiB of them.
 const CACHED_TEXELS: usize = 64 * 1024 * 1024;
 
+/// how many command lists fast mode goes without hashing a texture nothing
+/// wrote over, and one only a flush of everything went over.
+const TEXTURE_TRUSTED_LISTS: u64 = 600;
+const TEXTURE_FLUSHED_LISTS: u64 = 64;
+
 impl TextureCache {
-    /// a new command list starts, and memory may have changed since the last.
+    /// a new command list starts.
     pub fn begin_list(&mut self) {
         self.list += 1;
         self.written.clear();
@@ -853,24 +891,39 @@ impl TextureCache {
         }
     }
 
-    /// the texture, when it was checked during this list and nothing drew
-    /// over it since.
-    fn checked(&self, key: TextureKey, size: u32) -> Option<(Arc<[[u8; 4]]>, Option<Arc<[u8]>>)> {
-        let decoded = self.entries.get(&key)?;
-        let (list, writes) = decoded.checked;
+    /// the texture, when nothing wrote over it since it was checked, in this
+    /// list, or in fast mode in one of the last few hundred: the journal has
+    /// the memory a title's CPU, its services and the GPU write, and the
+    /// texture is read again now and then all the same in case a write went
+    /// past it.
+    fn checked(&mut self, key: TextureKey, size: u32) -> Option<(Arc<[[u8; 4]]>, Option<Arc<[u8]>>)> {
+        let (list, written) = (self.list, &self.written);
+        let decoded = self.entries.get_mut(&key)?;
+        let (checked, writes, stamp, flushed) = decoded.checked;
         let addr = key.0;
-        let overwritten = self.written[writes.min(self.written.len())..]
-            .iter()
-            .any(|&(start, length)| start < addr.saturating_add(size) && addr < start.saturating_add(length));
-        // fast mode trusts a texture for a few lists before hashing it again
-        let trusted = crate::fast_with(crate::speedup::TEXTURES) && list != self.list && self.list - list < 64;
-        (trusted || (list == self.list && !overwritten)).then(|| (decoded.texels.clone(), decoded.etc1.clone()))
+        let (journaled, now) = crate::journal::written_since(stamp, addr, size);
+        let drawn_over = checked == list
+            && written[writes.min(written.len())..].iter().any(|&(start, length)| start < addr.saturating_add(size) && addr < start.saturating_add(length));
+        if journaled == crate::journal::Written::Something || drawn_over {
+            return None;
+        }
+        let flushed = flushed || journaled == crate::journal::Written::Everything;
+        (decoded.checked.2, decoded.checked.3) = (now, flushed);
+        // a flush of everything since leaves it trusted for a few lists, as
+        // nothing at all does for a few hundred
+        let lists = if flushed { TEXTURE_FLUSHED_LISTS } else { TEXTURE_TRUSTED_LISTS };
+        let trusted = match crate::fast_with(crate::speedup::TEXTURES) {
+            true => list - checked < lists,
+            false => checked == list,
+        };
+        trusted.then(|| (decoded.texels.clone(), decoded.etc1.clone()))
     }
 
-    fn decoded(&mut self, key: TextureKey, data: &[u8]) -> (Arc<[[u8; 4]]>, Option<Arc<[u8]>>) {
+    /// the texture decoded from data, which was read after stamp.
+    fn decoded(&mut self, key: TextureKey, data: &[u8], stamp: u64) -> (Arc<[[u8; 4]]>, Option<Arc<[u8]>>) {
         let (_, format, width, height) = key;
         let hash = fingerprint(data);
-        let checked = (self.list, self.written.len());
+        let checked = (self.list, self.written.len(), stamp, false);
         let hit = self.entries.get(&key).is_some_and(|decoded| decoded.hash == hash);
         texture_stats(key, data.len(), hit);
         if let Some(decoded) = self.entries.get_mut(&key).filter(|decoded| decoded.hash == hash) {
@@ -1104,14 +1157,17 @@ fn bind_texture<M: GpuMemory>(
     let (texels, etc1) = match (drawn, cache.checked(key, size as u32)) {
         (Some(_), _) => (Arc::from([]), None),
         (None, Some(decoded)) => decoded,
-        (None, None) => match memory.slice(addr, size) {
-            Some(data) => cache.decoded(key, data),
-            None => {
-                let mut data = vec![0u8; size];
-                memory.read(addr, &mut data);
-                cache.decoded(key, &data)
+        (None, None) => {
+            let stamp = crate::journal::now();
+            match memory.slice(addr, size) {
+                Some(data) => cache.decoded(key, data, stamp),
+                None => {
+                    let mut data = vec![0u8; size];
+                    memory.read(addr, &mut data);
+                    cache.decoded(key, &data, stamp)
+                }
             }
-        },
+        }
     };
 
     // filter mode in bit 1 (magnification) and 2 (minification), the wrap
@@ -1914,13 +1970,19 @@ pub fn draw<M: GpuMemory>(
     let list = resources.textures.list;
     let key = (index_base, vertex_count, index_short);
     let meshes = &mut resources.meshes;
-    let doubted = meshes.indices.get(&key).is_some_and(|entry| !meshes.trusted(index_base, entry.0, list));
+    let stamp = crate::journal::now();
+    let index_bytes = vertex_count * if index_short { 2 } else { 1 };
+    let trusted = meshes.indices.get(&key).and_then(|entry| meshes.trusted(index_base, index_bytes, entry.0, list));
     let cached = match meshes.indices.get_mut(&key) {
         Some((checked, indices, range, rebased, bytes)) if indexed && crate::fast_with(crate::speedup::MESHES) => {
-            // trusted a while, then kept as long as the bytes stay the same
-            let trusted = !doubted;
+            // trusted while nothing writes over it, then kept as long as the
+            // bytes stay the same
+            if let Some(now) = trusted {
+                *checked = now;
+            }
+            let trusted = trusted.is_some();
             let same = trusted
-                || memory.slice(index_base, (vertex_count * if index_short { 2 } else { 1 }) as usize).is_some_and(|data| {
+                || memory.slice(index_base, index_bytes as usize).is_some_and(|data| {
                     if index_short {
                         data.as_chunks::<2>().0.iter().zip(indices.iter()).all(|(read, &index)| u16::from_le_bytes(*read) as u32 == index)
                     } else {
@@ -1928,7 +1990,7 @@ pub fn draw<M: GpuMemory>(
                     }
                 });
             if same && !trusted {
-                *checked = list;
+                *checked = (list, stamp, false);
             }
             let found = same.then(|| (indices.clone(), *range, Some((rebased.clone(), bytes.clone()))));
             if !same {
@@ -1970,7 +2032,7 @@ pub fn draw<M: GpuMemory>(
             });
             if let Some((rebased, bytes)) = &rebased {
                 resources.meshes.make_room(indices.len() * 8 + bytes.len());
-                resources.meshes.indices.insert(key, (list, indices.clone(), range, rebased.clone(), bytes.clone()));
+                resources.meshes.indices.insert(key, ((list, stamp, false), indices.clone(), range, rebased.clone(), bytes.clone()));
             }
             (indices, range, rebased)
         }
@@ -2364,6 +2426,8 @@ mod tests {
         }
 
         fn write(&mut self, addr: u32, data: &[u8]) {
+            // as the guest's memory, which tells the journal
+            crate::journal::note(addr, data.len() as u32);
             for (i, byte) in data.iter().enumerate() {
                 self.0.insert(addr + i as u32, *byte);
             }
@@ -2617,23 +2681,25 @@ mod tests {
         assert_eq!(texture(Wrap::ClampToEdge).texel(-1, 3), white);
     }
 
-    /// within a command list memory changes only where draws write, so a
-    /// texture is checked once, and again after a draw over it or in the
-    /// next list.
+    /// a texture is checked once, and again after a draw or a flush over it,
+    /// or outside fast mode in the next list.
     #[test]
-    fn textures_are_checked_once_a_list_unless_drawn_over() {
+    fn textures_are_checked_once_a_list_unless_written_over() {
         let mut cache = TextureCache::default();
-        let key = (0x1000, TextureFormat::Rgba8, 8, 8);
+        let key = (0x7100_1000, TextureFormat::Rgba8, 8, 8);
         cache.begin_list();
         assert!(cache.checked(key, 256).is_none(), "never seen");
-        cache.decoded(key, &[0x11; 256]);
+        cache.decoded(key, &[0x11; 256], crate::journal::now());
         assert!(cache.checked(key, 256).is_some());
-        cache.wrote(0x5000, 0x100);
+        cache.wrote(0x7100_5000, 0x100);
         assert!(cache.checked(key, 256).is_some(), "a draw somewhere else");
-        cache.wrote(0x1080, 0x10);
+        cache.wrote(0x7100_1080, 0x10);
         assert!(cache.checked(key, 256).is_none(), "a draw over it");
-        cache.decoded(key, &[0x11; 256]);
+        cache.decoded(key, &[0x11; 256], crate::journal::now());
         assert!(cache.checked(key, 256).is_some(), "checked again after the draw");
+        crate::journal::note(0x7100_10F0, 0x20);
+        assert!(cache.checked(key, 256).is_none(), "a flush over it");
+        cache.decoded(key, &[0x11; 256], crate::journal::now());
         cache.begin_list();
         assert!(cache.checked(key, 256).is_none(), "a new list");
     }
@@ -2642,10 +2708,10 @@ mod tests {
     fn the_texture_cache_notices_changed_bytes() {
         let mut cache = TextureCache::default();
         let key = (0x1000, TextureFormat::Rgba8, 8, 8);
-        let first = cache.decoded(key, &[0x11; 256]).0;
-        let again = cache.decoded(key, &[0x11; 256]).0;
+        let first = cache.decoded(key, &[0x11; 256], 0).0;
+        let again = cache.decoded(key, &[0x11; 256], 0).0;
         assert!(Arc::ptr_eq(&first, &again));
-        let changed = cache.decoded(key, &[0x22; 256]).0;
+        let changed = cache.decoded(key, &[0x22; 256], 0).0;
         assert_ne!(first[0], changed[0]);
     }
 
