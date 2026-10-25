@@ -5179,24 +5179,6 @@ impl Gles {
                 let (from, to) = rows.map_or((addr, size), |(start, end)| (addr + start * row, (end - start) * row));
                 // what others drew there comes over without waiting on the GL thread
                 if self.adopt_all(index, from, to)?.is_empty() {
-                    // all of it drawn, no row of memory goes up, it is only
-                    // kept as the GL thread would
-                    if self.surfaces[index].dirty == Some((0, height)) {
-                        let bytes = match memory.slice(addr, size as usize) {
-                            Some(bytes) => bytes.to_vec(),
-                            None => {
-                                let mut bytes = vec![0; size as usize];
-                                memory.read(addr, &mut bytes);
-                                bytes
-                            }
-                        };
-                        let surface = &mut self.surfaces[index];
-                        if bytes != surface.shadow {
-                            (surface.shadow, surface.picture) = (bytes, None);
-                        }
-                        (surface.checked, surface.stale) = (true, false);
-                        return Ok(index);
-                    }
                     // memory nothing wrote over since it held the shadow
                     // still does, it is compared again now and then all the
                     // same in case a write went past the journal
@@ -5219,6 +5201,17 @@ impl Gles {
                         let flushes = self.flushes;
                         let surface = &mut self.surfaces[index];
                         (surface.checked, surface.stale, surface.matched) = (true, false, (now, flushes));
+                        return Ok(index);
+                    }
+                    // all of it drawn, as after taking another's tiles, no
+                    // row of memory goes up: memory is only kept as the GL
+                    // thread would
+                    if self.surfaces[index].dirty == Some((0, height)) {
+                        let mut bytes = vec![0; size as usize];
+                        memory.read(addr, &mut bytes);
+                        let flushes = self.flushes;
+                        let surface = &mut self.surfaces[index];
+                        (surface.shadow, surface.picture, surface.checked, surface.stale, surface.matched) = (bytes, None, true, false, (now, flushes));
                         return Ok(index);
                     }
                 }
