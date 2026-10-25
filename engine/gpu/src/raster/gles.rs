@@ -2991,7 +2991,10 @@ impl DrawJob {
                 cleared = true;
             }
             if std::mem::take(&mut local.disturbed) || cleared {
-                local.cache = Cached::default();
+                // what only draws set stays: the uniform blocks and tables
+                // they bound and the shaded vertex array's attributes
+                let old = std::mem::take(&mut local.cache);
+                local.cache = Cached { uniforms: old.uniforms, shading: old.shading, tables_bound: old.tables_bound, stride: old.stride, resident: old.resident, ..Cached::default() };
                 if cleared {
                     local.cache.framebuffer = Some(self.framebuffer);
                 }
