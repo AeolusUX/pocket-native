@@ -227,6 +227,28 @@ mod tests {
 
     /// a system with one running thread, whose TLS holds the command buffer
     /// a request is read from and replied into.
+    /// no library applet is there until the title prepares one, a title
+    /// told one is there cancels it and waits for it to close, Yo-kai Watch
+    /// 2 as it started. the applets a title names are there.
+    #[test]
+    fn a_library_applet_is_there_only_once_prepared() {
+        let (mut system, buffer) = system_with_thread();
+        let is_registered = |system: &mut System, applet: u32| {
+            buffer.set(&mut system.memory, 0, Header::new(0x0009, 1, 0).0);
+            buffer.set(&mut system.memory, 1, applet);
+            handle_request(system, Target::service("APT:A".into(), 0));
+            assert_eq!(buffer.get(&mut system.memory, 1), 0);
+            buffer.get(&mut system.memory, 2)
+        };
+        assert_eq!(is_registered(&mut system, 0x400), 0);
+        assert_eq!(is_registered(&mut system, 0x101), 1);
+        // PrepareToStartLibraryApplet(software keyboard)
+        buffer.set(&mut system.memory, 0, Header::new(0x0018, 1, 0).0);
+        buffer.set(&mut system.memory, 1, 0x401);
+        handle_request(&mut system, Target::service("APT:A".into(), 0));
+        assert_eq!(is_registered(&mut system, 0x400), 1);
+    }
+
     fn system_with_thread() -> (System, CommandBuffer) {
         let mut system = System::new(Config::default());
         let id = system
