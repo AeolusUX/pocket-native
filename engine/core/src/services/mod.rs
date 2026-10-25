@@ -1,6 +1,7 @@
 //! high-level service emulation.
 
 pub mod apt;
+pub mod boss;
 pub mod cam;
 pub mod cecd;
 pub mod err;
@@ -69,6 +70,7 @@ pub struct ServiceState {
     pub y2r: y2r::Y2rState,
     pub nfc: nfc::NfcState,
     pub cecd: cecd::CecdState,
+    pub boss: boss::BossState,
     pub cam: cam::CamState,
     /// commands we logged as unimplemented, so the log stays readable and the
     /// diagnostics overlay can show what a title is actually asking for.
@@ -106,6 +108,7 @@ pub fn handle_request(system: &mut System, target: Target) {
         "frd:u" | "frd:a" => frd::handle(system, &buffer, header),
         "nfc:u" | "nfc:m" => nfc::handle(system, &buffer, header),
         "cecd:u" | "cecd:s" => cecd::handle(system, &buffer, header),
+        "boss:U" | "boss:P" => boss::handle(system, &buffer, header),
         "cam:u" => cam::handle(system, &buffer, header),
         _ => misc::handle(system, &buffer, header, &name),
     };
@@ -133,7 +136,7 @@ pub fn handle_request(system: &mut System, target: Target) {
             buffer.set(&mut system.memory, 1, 0);
             buffer.set(&mut system.memory, 2, descriptor);
             buffer.set(&mut system.memory, 3, addr);
-        } else if is_network_service(&name) && !boss_bookkeeping(&name, header.command_id()) {
+        } else if is_network_service(&name) {
             offline(system, &buffer, header, &name);
         } else {
             unimplemented(system, &buffer, header, &name);
@@ -146,7 +149,6 @@ fn is_network_service(name: &str) -> bool {
     matches!(
         name,
         "frd:u" | "frd:a"
-            | "boss:U" | "boss:P"
             | "nwm::UDS"
             | "http:C"
             | "ssl:C"
@@ -155,14 +157,6 @@ fn is_network_service(name: &str) -> bool {
             | "olv:u"
             | "act:u" | "act:a"
     )
-}
-
-/// BOSS commands that only change what the console has registered, its
-/// storage, the opt-out flag and its tasks, which succeed offline on the
-/// console too: New Super Mario Bros. 2 Special Edition panics when turning
-/// SpotPass off fails.
-fn boss_bookkeeping(name: &str, command: u16) -> bool {
-    name.starts_with("boss:") && matches!(command, 0x0002 | 0x0003 | 0x0009 | 0x000B | 0x000C | 0x000D | 0x001E | 0x002F | 0x0031)
 }
 
 /// reply used for a network service we have not implemented, an explicit "not
@@ -221,7 +215,7 @@ pub fn unimplemented(system: &mut System, buffer: &CommandBuffer, header: Header
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::Config;
 
@@ -249,7 +243,7 @@ mod tests {
         assert_eq!(is_registered(&mut system, 0x400), 1);
     }
 
-    fn system_with_thread() -> (System, CommandBuffer) {
+    pub(crate) fn system_with_thread() -> (System, CommandBuffer) {
         let mut system = System::new(Config::default());
         let id = system
             .kernel
