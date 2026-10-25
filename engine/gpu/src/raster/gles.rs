@@ -3667,16 +3667,6 @@ impl Worker {
         thread::current().id() == self.thread
     }
 
-    fn post(&self, job: impl FnOnce() + Send + 'static) {
-        if self.here() {
-            flush_clears(None);
-            job();
-        } else {
-            self.flush();
-            self.jobs.send((false, Box::new(job))).expect("the GL thread stopped");
-        }
-    }
-
     /// posts work that touches no surface, the clears left for draws stay.
     fn post_keeping(&self, job: impl FnOnce() + Send + 'static) {
         if self.here() {
@@ -3725,8 +3715,20 @@ impl Worker {
     }
 
     fn run<R>(&self, job: impl FnOnce() -> R) -> R {
+        self.run_with(false, job)
+    }
+
+    /// run for work that touches no surface but those whose clears it sees to
+    /// itself, the clears left for draws stay.
+    fn run_keeping<R>(&self, job: impl FnOnce() -> R) -> R {
+        self.run_with(true, job)
+    }
+
+    fn run_with<R>(&self, keeps_clears: bool, job: impl FnOnce() -> R) -> R {
         if self.here() {
-            flush_clears(None);
+            if !keeps_clears {
+                flush_clears(None);
+            }
             return job();
         }
         let (done, result) = std::sync::mpsc::sync_channel(1);
@@ -3740,7 +3742,7 @@ impl Worker {
         let wrapped: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + '_>, Box<dyn FnOnce() + Send + 'static>>(wrapped) };
         let _timed = timed(20);
         self.flush();
-        self.jobs.send((false, wrapped)).expect("the GL thread stopped");
+        self.jobs.send((keeps_clears, wrapped)).expect("the GL thread stopped");
         result.recv().expect("the GL thread stopped").0
     }
 }
@@ -4726,7 +4728,9 @@ impl Gles {
         // in the surfaces' pixels: the copy, the rows, and where it reads
         let quarters = self.quarters;
         let up = move |length: u32| length * quarters / 4;
-        self.worker.post(move || unsafe {
+        self.worker.post_keeping(move || unsafe {
+            flush_clears(Some(source_texture));
+            flush_clears(Some(target_texture));
             disturb();
             // SAFETY: on the GL thread, both textures have immutable rgba8
             // storage and the dispatch stays inside them
@@ -4825,7 +4829,11 @@ impl Gles {
         let split = a_height / t.scale.1;
         let parts = [(a, a_height, 0, split), (b, b_height, split, t.copy.1 - split)];
         let target_texture = self.surfaces[target].texture;
-        self.worker.post(move || unsafe {
+        self.worker.post_keeping(move || unsafe {
+            for (source, ..) in parts {
+                flush_clears(Some(source));
+            }
+            flush_clears(Some(target_texture));
             disturb();
             // SAFETY: on the GL thread, every texture has immutable rgba8
             // storage and each dispatch stays inside them
@@ -4908,7 +4916,7 @@ impl Gles {
         if !self.worker.here() {
             let worker = self.worker.clone();
             wait_from("picture");
-            return worker.run(|| self.picture(screen));
+            return worker.run_keeping(|| self.picture(screen));
         }
         let _timed = timed(1);
         let (width, height) = screen.size;
@@ -4925,6 +4933,8 @@ impl Gles {
         if self.surfaces[index].screen_batch != screen.batch {
             return Ok(None);
         }
+        // the screen's clear only, the others wait for their draws
+        flush_clears(Some(self.surfaces[index].texture));
         self.current()?;
         let program = match self.upright {
             Some(program) => program,
@@ -5824,7 +5834,14 @@ impl Gles {
         self.presenting.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let presenting = self.presenting.clone();
         let gl = self.gl;
-        self.worker.post(move || {
+        self.worker.post_keeping(move || {
+            // the shown screens' clears, those of pictures still being drawn
+            // wait for their draws
+            for part in &parts {
+                if let Part::Surface { texture, .. } = part {
+                    flush_clears(Some(*texture));
+                }
+            }
             sim_present(&gl);
             if let Err(error) = show(gl, parts, frames) {
                 log::error!("could not show the screens, {error}");
