@@ -133,7 +133,7 @@ pub fn handle_request(system: &mut System, target: Target) {
             buffer.set(&mut system.memory, 1, 0);
             buffer.set(&mut system.memory, 2, descriptor);
             buffer.set(&mut system.memory, 3, addr);
-        } else if is_network_service(&name) {
+        } else if is_network_service(&name) && !boss_bookkeeping(&name, header.command_id()) {
             offline(system, &buffer, header, &name);
         } else {
             unimplemented(system, &buffer, header, &name);
@@ -155,6 +155,14 @@ fn is_network_service(name: &str) -> bool {
             | "olv:u"
             | "act:u" | "act:a"
     )
+}
+
+/// BOSS commands that only change what the console has registered, its
+/// storage, the opt-out flag and its tasks, which succeed offline on the
+/// console too: New Super Mario Bros. 2 Special Edition panics when turning
+/// SpotPass off fails.
+fn boss_bookkeeping(name: &str, command: u16) -> bool {
+    name.starts_with("boss:") && matches!(command, 0x0002 | 0x0003 | 0x0009 | 0x000B | 0x000C | 0x000D | 0x001E | 0x002F | 0x0031)
 }
 
 /// reply used for a network service we have not implemented, an explicit "not
