@@ -724,7 +724,7 @@ impl System {
             log::warn!("no GPU thread, drawing on the CPU's, {error}");
             return;
         }
-        self.gpu_queue = Some(GpuQueue { jobs, pending: Arc::default(), done: Arc::default(), finished: Arc::default(), presents: Arc::default() });
+        self.gpu_queue = Some(GpuQueue { jobs, pending: Arc::default(), done: Arc::default(), finished: Arc::default(), presents: Arc::default(), waiter: Arc::default() });
     }
 
     /// does GPU work, on the GPU thread when there is one, then raises its
@@ -741,7 +741,7 @@ impl System {
         };
         let parts = Shared((&mut self.gpu as *mut Gpu, self.renderer.as_mut() as *mut dyn Renderer, &mut self.memory as *mut Memory));
         let interrupts = interrupts.to_vec();
-        let (pending, done, finished) = (queue.pending.clone(), queue.done.clone(), queue.finished.clone());
+        let (pending, done, finished, waiter) = (queue.pending.clone(), queue.done.clone(), queue.finished.clone(), queue.waiter.clone());
         pending.fetch_add(1, Ordering::AcqRel);
         let work = Shared(work);
         let job = move || {
@@ -758,7 +758,9 @@ impl System {
                 done.lock().unwrap().extend(interrupts);
                 finished.fetch_add(1, Ordering::AcqRel);
             }
-            pending.fetch_sub(1, Ordering::AcqRel);
+            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                waiter.wake();
+            }
         };
         let _ = queue.jobs.send(Box::new(job));
     }
@@ -769,10 +771,7 @@ impl System {
         let Some(queue) = &self.gpu_queue else { return };
         if queue.pending.load(Ordering::Acquire) > 0 {
             let start = std::time::Instant::now();
-            let mut tries = 0;
-            while queue.pending.load(Ordering::Acquire) > 0 {
-                pause(&mut tries);
-            }
+            queue.waiter.wait(|| queue.pending.load(Ordering::SeqCst) == 0);
             GPU_WAITED.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
         self.gpu_interrupts();
@@ -1043,13 +1042,10 @@ impl System {
         let layout = Some((areas, cursor, black, smooth, drawn_over));
         let forced = self.panel.0 != layout || self.panel.1 >= 5;
         self.panel = (layout, if forced { 0 } else { self.panel.1 + 1 });
-        let presents = self.gpu_queue.as_ref().map(|queue| queue.presents.clone());
+        let presents = self.gpu_queue.as_ref().map(|queue| (queue.presents.clone(), queue.waiter.clone()));
         let frame = self.frames;
-        if let Some(presents) = &presents {
-            let mut tries = 0;
-            while presents.load(Ordering::Acquire) > 0 {
-                pause(&mut tries);
-            }
+        if let Some((presents, waiter)) = &presents {
+            waiter.wait(|| presents.load(Ordering::SeqCst) == 0);
             presents.fetch_add(1, Ordering::AcqRel);
         }
         self.gpu_work(&[], move |gpu, _, guest| {
@@ -1058,8 +1054,10 @@ impl System {
             let new = gpu.presented != state;
             let again = interpolate && std::mem::replace(&mut gpu.presented_new, new);
             if !forced && !new && !again {
-                if let Some(presents) = presents {
-                    presents.fetch_sub(1, Ordering::AcqRel);
+                if let Some((presents, waiter)) = presents {
+                    if presents.fetch_sub(1, Ordering::SeqCst) == 1 {
+                        waiter.wake();
+                    }
                 }
                 return;
             }
@@ -1076,8 +1074,10 @@ impl System {
                 shown[index] = Some((image, area));
             }
             gpu.present_panel(shown, cursor, overlays, smooth, interpolate, frames);
-            if let Some(presents) = presents {
-                presents.fetch_sub(1, Ordering::AcqRel);
+            if let Some((presents, waiter)) = presents {
+                if presents.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    waiter.wake();
+                }
             }
         });
     }
@@ -1286,14 +1286,39 @@ fn screen_pixels(gpu: &mut Gpu, guest: &mut GuestMemory, screen: zakuro_common::
     out
 }
 
-/// a wait for the GPU thread, which yields a while and then sleeps, so a
-/// long one does not keep a core busy, and hot, for nothing.
-fn pause(tries: &mut u32) {
-    *tries += 1;
-    if *tries < 64 {
-        std::thread::yield_now();
-    } else {
-        std::thread::sleep(std::time::Duration::from_micros(100));
+/// the title's thread waiting on the GPU thread, as the console's CPU waits
+/// for the GPU's interrupt: it gives way a few times, most waits are short,
+/// then sleeps until the GPU thread wakes it as it finishes, rather than
+/// waking to look every so often and keeping a core busy, and hot.
+#[derive(Default)]
+struct Waiter {
+    thread: std::sync::Mutex<Option<std::thread::Thread>>,
+    asleep: std::sync::atomic::AtomicBool,
+}
+
+impl Waiter {
+    fn wait(&self, done: impl Fn() -> bool) {
+        for _ in 0..16 {
+            if done() {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        *self.thread.lock().unwrap() = Some(std::thread::current());
+        self.asleep.store(true, Ordering::SeqCst);
+        while !done() {
+            // a wake can't be missed, the timeout is there all the same
+            std::thread::park_timeout(std::time::Duration::from_millis(2));
+        }
+        self.asleep.store(false, Ordering::SeqCst);
+    }
+
+    fn wake(&self) {
+        if self.asleep.load(Ordering::SeqCst) {
+            if let Some(thread) = self.thread.lock().unwrap().as_ref() {
+                thread.unpark();
+            }
+        }
     }
 }
 
@@ -1330,6 +1355,7 @@ struct GpuQueue {
     done: Arc<std::sync::Mutex<Vec<services::gsp::InterruptId>>>,
     finished: Arc<AtomicUsize>,
     presents: Arc<AtomicUsize>,
+    waiter: Arc<Waiter>,
 }
 
 /// what the GPU thread works on, handed over while the queue holds it.
