@@ -2777,6 +2777,39 @@ impl Resident {
     }
 }
 
+/// buffers the GPU thread fills for a draw, handed back once the GL thread
+/// has sent them on rather than freed there: glibc frees a buffer made on
+/// another thread through its arena's lock, and the two threads spent about
+/// a fifth of their time making and freeing them.
+struct Pool<T>(std::sync::Mutex<Vec<Vec<T>>>);
+
+impl<T> Pool<T> {
+    const fn new() -> Self {
+        Pool(std::sync::Mutex::new(Vec::new()))
+    }
+
+    fn take(&self, capacity: usize) -> Vec<T> {
+        let mut buffer = self.0.lock().unwrap().pop().unwrap_or_default();
+        buffer.reserve(capacity);
+        buffer
+    }
+
+    fn give(&self, mut buffer: Vec<T>) {
+        // a big one goes, rather than stay held
+        if buffer.capacity() == 0 || buffer.capacity() * std::mem::size_of::<T>() > 1 << 20 {
+            return;
+        }
+        buffer.clear();
+        let mut pool = self.0.lock().unwrap();
+        if pool.len() < 64 {
+            pool.push(buffer);
+        }
+    }
+}
+
+static WORDS: Pool<u32> = Pool::new();
+static BYTES: Pool<u8> = Pool::new();
+
 enum Submit {
     Triangles { viewport: [i32; 4], vertices: Vec<u8>, count: i32 },
     Shaded { viewport: [i32; 4], cull: u32, uniforms: Vec<u32>, attributes: Attributes, indices: Vec<u8>, count: i32, range: (u32, u32), resident_indices: Option<Arc<[u8]>> },
@@ -2804,6 +2837,14 @@ struct DrawJob {
 }
 
 impl DrawJob {
+    fn submit_logged(self, gl: GlRef) {
+        if let Err(error) = self.submit(gl) {
+            if super::first_time(&error) {
+                log::error!("the GPU could not draw, {error}");
+            }
+        }
+    }
+
     fn submit(self, gl: GlRef) -> Result<(), String> {
         let _timed_gl = timed(9);
         for source in self.sources.into_iter().flatten() {
@@ -2925,7 +2966,9 @@ impl DrawJob {
                 if cache.uniforms != self.uniforms {
                     let offset = local.uniforms.push(&gl, glow::UNIFORM_BUFFER, word_bytes(&self.uniforms))?;
                     gl.bind_buffer_range(glow::UNIFORM_BUFFER, 3, Some(local.uniforms.buffer), offset as i32, self.uniforms.len() as i32 * 4);
-                    local.cache.uniforms = self.uniforms;
+                    WORDS.give(std::mem::replace(&mut local.cache.uniforms, self.uniforms));
+                } else {
+                    WORDS.give(self.uniforms);
                 }
                 if let Some(at) = local.tables_at.filter(|&at| local.cache.tables_bound != Some(at)) {
                     gl.bind_buffer_range(glow::SHADER_STORAGE_BUFFER, 4, Some(local.tables.buffer), at as i32, TABLES_SIZE as i32);
@@ -2947,6 +2990,7 @@ impl DrawJob {
                             cache.vertex_array = Some(self.vertex_array);
                         }
                         let offset = local.vertices.push(&gl, glow::ARRAY_BUFFER, &vertices)?;
+                        BYTES.give(vertices);
                         gl.draw_arrays(glow::TRIANGLES, (offset / VERTEX_SIZE) as i32, count);
                     }
                     Submit::Shaded { viewport, cull, uniforms, attributes, indices, count, range, resident_indices } => {
@@ -2968,7 +3012,9 @@ impl DrawJob {
                         if cache.shading != uniforms {
                             let offset = local.shading.push(&gl, glow::UNIFORM_BUFFER, word_bytes(&uniforms))?;
                             gl.bind_buffer_range(glow::UNIFORM_BUFFER, 6, Some(local.shading.buffer), offset as i32, uniforms.len() as i32 * 4);
-                            local.cache.shading = uniforms;
+                            WORDS.give(std::mem::replace(&mut local.cache.shading, uniforms));
+                        } else {
+                            WORDS.give(uniforms);
                         }
                         let cache = &mut local.cache;
                         if cache.vertex_array != Some(self.shaded_array) {
@@ -2978,6 +3024,7 @@ impl DrawJob {
                         let base_vertex = match attributes {
                             Attributes::Fetched { bytes, slots } => {
                                 let at = local.inputs.push_aligned(&gl, glow::ARRAY_BUFFER, &bytes, 16)?;
+                                BYTES.give(bytes);
                                 for (slot, attribute) in slots.iter().enumerate() {
                                     let slot = slot as u32;
                                     match *attribute {
@@ -3025,6 +3072,7 @@ impl DrawJob {
                             Attributes::Packed { bytes, stride } => {
                                 let vertex_bytes = stride.max(1) * 16;
                                 let offset = local.inputs.push_aligned(&gl, glow::ARRAY_BUFFER, &bytes, vertex_bytes)?;
+                                BYTES.give(bytes);
                                 if local.cache.stride != Some(stride) {
                                     for slot in 0..16u32 {
                                         if (slot as usize) < stride {
@@ -3048,7 +3096,9 @@ impl DrawJob {
                             }
                             None => {
                                 let kind = if indices.len() == count as usize * 2 { glow::UNSIGNED_SHORT } else { glow::UNSIGNED_INT };
-                                (local.indices.push(&gl, glow::ELEMENT_ARRAY_BUFFER, &indices)?, kind)
+                                let offset = local.indices.push(&gl, glow::ELEMENT_ARRAY_BUFFER, &indices)?;
+                                BYTES.give(indices);
+                                (offset, kind)
                             }
                         };
                         let called = timed(18);
@@ -3439,8 +3489,11 @@ struct Worker {
     jobs: std::sync::mpsc::Sender<(bool, Job)>,
     thread: ThreadId,
     /// draws waiting to go over together, one wakeup for many
-    held: std::sync::Mutex<Vec<Job>>,
+    held: std::sync::Mutex<Vec<(DrawJob, GlRef)>>,
 }
+
+/// the lists of draws sent over, handed back empty to be filled again.
+static DRAWN: Pool<(DrawJob, GlRef)> = Pool::new();
 
 impl Worker {
     fn start() -> Result<(Worker, GlRef, Option<Compiler>), String> {
@@ -3515,13 +3568,16 @@ impl Worker {
     }
 
     /// a draw, held to go with the next few.
-    fn post_draw(&self, job: impl FnOnce() + Send + 'static) {
+    fn post_draw(&self, job: DrawJob, gl: GlRef) {
         if self.here() {
-            job();
+            job.submit_logged(gl);
             return;
         }
         let mut held = self.held.lock().unwrap();
-        held.push(Box::new(job));
+        if held.capacity() == 0 {
+            *held = DRAWN.take(16);
+        }
+        held.push((job, gl));
         if held.len() >= 16 {
             let draws = std::mem::take(&mut *held);
             drop(held);
@@ -3536,8 +3592,16 @@ impl Worker {
         }
     }
 
-    fn send_draws(&self, draws: Vec<Job>) {
-        self.jobs.send((true, Box::new(move || draws.into_iter().for_each(|draw| draw())))).expect("the GL thread stopped");
+    fn send_draws(&self, mut draws: Vec<(DrawJob, GlRef)>) {
+        self.jobs
+            .send((
+                true,
+                Box::new(move || {
+                    draws.drain(..).for_each(|(draw, gl)| draw.submit_logged(gl));
+                    DRAWN.give(draws);
+                }),
+            ))
+            .expect("the GL thread stopped");
     }
 
     fn run<R>(&self, job: impl FnOnce() -> R) -> R {
@@ -5811,7 +5875,7 @@ impl Gles {
         };
 
         let worded = timed(19);
-        let mut words = Vec::with_capacity(UNIFORM_WORDS);
+        let mut words = WORDS.take(UNIFORM_WORDS);
         for base in STAGE_REGISTERS {
             words.extend([r[base], r[base + 1], r[base + 2], r[base + 3], r[base + 4], 0, 0, 0]);
         }
@@ -5933,7 +5997,7 @@ impl Gles {
                         Attributes::Resident { arrays: fetched.arrays.iter().map(|array| array.bytes.clone()).collect(), slots }
                     }
                     Some(fetched) => {
-                        let mut bytes = Vec::new();
+                        let mut bytes = BYTES.take(fetched.arrays.iter().map(|array| array.bytes.len() + 16).sum());
                         let mut starts = Vec::with_capacity(fetched.arrays.len());
                         for array in &fetched.arrays {
                             bytes.resize(bytes.len().next_multiple_of(16), 0);
@@ -5962,11 +6026,12 @@ impl Gles {
                     Some((bytes, highest)) if !thin && matches!(attributes, Attributes::Resident { .. }) => (Vec::new(), (0, highest), Some(bytes.clone())),
                     _ => {
                         let range = shading.indices[..kept].iter().fold((u32::MAX, 0), |(low, high), &index| (low.min(index), high.max(index)));
-                        let indices: Vec<u8> = if range.1 <= 0xFFFF {
-                            super::le_bytes(&shading.indices[..kept], |index| (index as u16).to_le_bytes())
+                        let mut indices = BYTES.take(kept * 4);
+                        if range.1 <= 0xFFFF {
+                            shading.indices[..kept].iter().for_each(|&index| indices.extend_from_slice(&(index as u16).to_le_bytes()));
                         } else {
-                            super::le_bytes(&shading.indices[..kept], u32::to_le_bytes)
-                        };
+                            shading.indices[..kept].iter().for_each(|&index| indices.extend_from_slice(&index.to_le_bytes()));
+                        }
                         (indices, range, None)
                     }
                 };
@@ -5999,14 +6064,7 @@ impl Gles {
             targets: [Some(self.surfaces[color].texture), depth.map(|depth| self.surfaces[depth].texture)],
             sources,
         };
-        let gl = self.gl;
-        self.worker.post_draw(move || {
-            if let Err(error) = job.submit(gl) {
-                if super::first_time(&error) {
-                    log::error!("the GPU could not draw, {error}");
-                }
-            }
-        });
+        self.worker.post_draw(job, self.gl);
         Ok(())
     }
 
@@ -6048,7 +6106,7 @@ impl Gles {
         let unit = shading.unit;
         let read = unit.inputs_read();
         let registers: Vec<usize> = (0..INPUT_REGISTERS).filter(|r| read & (1 << r) != 0).collect();
-        let mut words: Vec<u32> = Vec::with_capacity(452);
+        let mut words = WORDS.take(452);
         words.extend(unit.float_uniforms.iter().flatten().map(|value| value.to_bits()));
         for [count, start, step, _] in unit.int_uniforms {
             words.extend([count as u32, start as u32, step as i8 as u32, 0]);
@@ -6057,7 +6115,7 @@ impl Gles {
         words.extend([depth_map.scale.to_bits(), depth_map.offset.to_bits(), 0, 0]);
         let (x, y, width, height) = shading.viewport;
         words.extend([x, y, width, height].map(f32::to_bits));
-        let mut inputs = Vec::with_capacity((shading.inputs.len() * registers.len()).max(1) * 16);
+        let mut inputs = BYTES.take((shading.inputs.len() * registers.len()).max(1) * 16);
         for input in shading.inputs {
             for &register in &registers {
                 for value in input[register] {
