@@ -14,8 +14,9 @@ pub const LANGUAGE_ENGLISH: u8 = 1;
 /// what GenHashConsoleUnique answers for every salt, this console's hash.
 pub const CONSOLE_HASH: u64 = 0x0000_5255_3341_5A55;
 
-/// the user agreement version the console accepted, minor then major.
-pub const EULA_VERSION: [u8; 2] = [1, 1];
+/// the user agreement version the console accepted, minor then major,
+/// the highest there is, so a game finds any version it knows accepted.
+pub const EULA_VERSION: [u8; 2] = [0x7F, 0x7F];
 
 pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bool {
     match header.command_id() {
