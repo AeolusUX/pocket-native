@@ -6334,7 +6334,8 @@ impl Gles {
                 constants[12 + i] = r[base + 2] & 0x000F_000F;
                 constants[18 + i] = r[base + 4] & 0x0003_0003;
             }
-            constants[24] = r[REG_UPDATE_BUFFER] & 0xFF00;
+            // the buffer updates, and the fog's mode and which way its depth runs
+            constants[24] = r[REG_UPDATE_BUFFER] & 0x1_FF07;
             constants[25] = texture_config & 0x2707;
             for (unit, (base, source)) in TEXTURE_UNIT_BASES.into_iter().zip(sources).enumerate() {
                 let config = r[base + 2];

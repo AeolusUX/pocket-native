@@ -685,7 +685,7 @@ void main() {
     // the configured buffer color
     vec4 held = vec4(0.0);
     vec4 next_buffer = colors[6];
-    uint update = DYNAMIC != 0u ? misc.x & 0xFF00u : UPDATE;
+    uint update = (DYNAMIC != 0u ? misc.x : UPDATE) & 0xFF00u;
     combine_stage(0u, stage_registers(0u, uvec4(SOURCE0, OPERAND0, COMBINER0, SCALE0)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
     combine_stage(1u, stage_registers(1u, uvec4(SOURCE1, OPERAND1, COMBINER1, SCALE1)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
     combine_stage(2u, stage_registers(2u, uvec4(SOURCE2, OPERAND2, COMBINER2, SCALE2)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
@@ -705,9 +705,12 @@ void main() {
     // the fog, by the fragment's depth through its table, the table's factor
     // of the color and the rest of the fog's, which the alpha test came
     // before. 5 turns it on, 7 is gas
-    if ((misc.x & 7u) == 5u) {
+    // known when built, as the rest of the update register, so programs
+    // without it leave it and its table out
+    uint fog_mode = DYNAMIC != 0u ? misc.x : UPDATE;
+    if ((fog_mode & 7u) == 5u) {
         float depth = fragment_depth();
-        precise float index = ((misc.x & 0x10000u) != 0u ? 1.0 - depth : depth) * 128.0;
+        precise float index = ((fog_mode & 0x10000u) != 0u ? 1.0 - depth : depth) * 128.0;
         precise float entry = clamp(floor(index), 0.0, 127.0);
         vec2 lookup = tables[FOG_TABLE + uint(entry)];
         precise float factor = clamp(lookup.x + lookup.y * (index - entry), 0.0, 1.0);
