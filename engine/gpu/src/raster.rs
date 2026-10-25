@@ -746,10 +746,10 @@ pub(crate) struct DrawnTexture {
 /// texture unit 0's configuration and backing data for one draw call.
 struct BoundTexture {
     /// the texture decoded, row by row from the top, none when it is drawn
-    /// or kept as ETC1 blocks.
+    /// or packed.
     texels: Arc<[[u8; 4]]>,
-    /// an ETC1 texture's blocks, for a GPU that samples them itself.
-    etc1: Option<Arc<[u8]>>,
+    /// the texture in a format of its own size, for a GPU that samples it.
+    packed: Option<Packed>,
     drawn: Option<DrawnTexture>,
     /// bilinear rather than point sampling when magnifying.
     linear: bool,
@@ -853,13 +853,17 @@ pub struct TextureCache {
     written: Vec<(u32, u32)>,
 }
 
-type TextureKey = (u32, TextureFormat, u32, u32);
+/// address, format, size, and whether it is packed for a GPU.
+type TextureKey = (u32, TextureFormat, u32, u32, bool);
+
+/// a texture as a GPU stores it, and how.
+pub(crate) type Packed = (crate::texture::Packing, Arc<[u8]>);
 
 struct Decoded {
     /// the hash of the bytes it was decoded from.
     hash: u64,
     texels: Arc<[[u8; 4]]>,
-    etc1: Option<Arc<[u8]>>,
+    packed: Option<Packed>,
     /// the list it was last read in, how many writes that list had made by
     /// then, the journal's stamp when it was last checked, and whether a
     /// flush of everything went over it since it was read.
@@ -896,7 +900,7 @@ impl TextureCache {
     /// the memory a title's CPU, its services and the GPU write, and the
     /// texture is read again now and then all the same in case a write went
     /// past it.
-    fn checked(&mut self, key: TextureKey, size: u32) -> Option<(Arc<[[u8; 4]]>, Option<Arc<[u8]>>)> {
+    fn checked(&mut self, key: TextureKey, size: u32) -> Option<(Arc<[[u8; 4]]>, Option<Packed>)> {
         let (list, written) = (self.list, &self.written);
         let decoded = self.entries.get_mut(&key)?;
         let (checked, writes, stamp, flushed) = decoded.checked;
@@ -916,19 +920,19 @@ impl TextureCache {
             true => list - checked < lists,
             false => checked == list,
         };
-        trusted.then(|| (decoded.texels.clone(), decoded.etc1.clone()))
+        trusted.then(|| (decoded.texels.clone(), decoded.packed.clone()))
     }
 
     /// the texture decoded from data, which was read after stamp.
-    fn decoded(&mut self, key: TextureKey, data: &[u8], stamp: u64) -> (Arc<[[u8; 4]]>, Option<Arc<[u8]>>) {
-        let (_, format, width, height) = key;
+    fn decoded(&mut self, key: TextureKey, data: &[u8], stamp: u64) -> (Arc<[[u8; 4]]>, Option<Packed>) {
+        let (_, format, width, height, packs) = key;
         let hash = fingerprint(data);
         let checked = (self.list, self.written.len(), stamp, false);
         let hit = self.entries.get(&key).is_some_and(|decoded| decoded.hash == hash);
         texture_stats(key, data.len(), hit);
         if let Some(decoded) = self.entries.get_mut(&key).filter(|decoded| decoded.hash == hash) {
             decoded.checked = checked;
-            return (decoded.texels.clone(), decoded.etc1.clone());
+            return (decoded.texels.clone(), decoded.packed.clone());
         }
         let count = (width * height) as usize;
         // a handheld in fast mode has little memory to spare, a quarter
@@ -937,19 +941,23 @@ impl TextureCache {
             self.entries.clear();
             self.texels = 0;
         }
-        // ETC1 stays compressed for a GPU that samples it, an eighth of
-        // the memory and of what the GPU reads
-        let etc1 = (format == crate::texture::TextureFormat::Etc1 && SAMPLES_ETC1.load(std::sync::atomic::Ordering::Relaxed))
-            .then(|| Arc::from(crate::texture::etc1_blocks(data, width, height)));
-        let texels: Arc<[[u8; 4]]> = match etc1 {
+        // a GPU that samples the PICA's smaller formats gets them as they
+        // are, ETC1 compressed and the rest at 1 or 2 bytes a texel, where
+        // RGBA8 is 4 to 8 times the memory, here and on the GPU
+        let packed = packs
+            .then(|| crate::texture::pack_texels(data, format, width, height))
+            .flatten()
+            .filter(|&(packing, _)| packing != crate::texture::Packing::Etc1 || SAMPLES_ETC1.load(std::sync::atomic::Ordering::Relaxed))
+            .map(|(packing, bytes)| (packing, Arc::from(bytes)));
+        let texels: Arc<[[u8; 4]]> = match packed {
             Some(_) => Arc::from([]),
             None => crate::texture::decode_texels(data, format, width, height).into(),
         };
-        if let Some(old) = self.entries.insert(key, Decoded { hash, texels: texels.clone(), etc1: etc1.clone(), checked }) {
-            self.texels -= old.texels.len() + old.etc1.map_or(0, |blocks| blocks.len() / 4);
+        if let Some(old) = self.entries.insert(key, Decoded { hash, texels: texels.clone(), packed: packed.clone(), checked }) {
+            self.texels -= old.texels.len() + old.packed.map_or(0, |(_, bytes)| bytes.len() / 4);
         }
-        self.texels += texels.len() + etc1.as_ref().map_or(0, |blocks| blocks.len() / 4);
-        (texels, etc1)
+        self.texels += texels.len() + packed.as_ref().map_or(0, |(_, bytes)| bytes.len() / 4);
+        (texels, packed)
     }
 }
 
@@ -972,7 +980,7 @@ fn texture_stats(key: TextureKey, bytes: usize, hit: bool) {
     if *looked == 5000 {
         let mut most: Vec<_> = changed.iter().collect();
         most.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        let most: Vec<String> = most.iter().take(8).map(|((addr, format, w, h), n)| format!("{addr:08x} {format:?} {w}x{h} x{n}")).collect();
+        let most: Vec<String> = most.iter().take(8).map(|((addr, format, w, h, _), n)| format!("{addr:08x} {format:?} {w}x{h} x{n}")).collect();
         log::info!("textures: {looked} looked at, {decoded} decoded, {} KiB hashed; most decoded {most:?}", *hashed / 1024);
         *counts = None;
     }
@@ -1109,7 +1117,7 @@ fn empty_texture() -> BoundTexture {
     static TEXELS: std::sync::OnceLock<Arc<[[u8; 4]]>> = std::sync::OnceLock::new();
     BoundTexture {
         texels: TEXELS.get_or_init(|| Arc::from([[0u8; 4]].as_slice())).clone(),
-        etc1: None,
+        packed: None,
         drawn: None,
         linear: false,
         wrap_s: Wrap::Repeat,
@@ -1126,6 +1134,7 @@ fn bind_texture<M: GpuMemory>(
     cache: &mut TextureCache,
     unit: usize,
     drawn: Option<DrawnTexture>,
+    packs: bool,
 ) -> Option<BoundTexture> {
     // one bit per unit in GPUREG_TEXUNIT_CONFIG.
     if registers[REG_TEXTURE_CONFIG] & (1 << unit) == 0 {
@@ -1153,8 +1162,8 @@ fn bind_texture<M: GpuMemory>(
     let bits = (width as u64) * (height as u64) * format.bits_per_pixel() as u64;
     let size = bits.div_ceil(8) as usize;
 
-    let key = (addr, format, width, height);
-    let (texels, etc1) = match (drawn, cache.checked(key, size as u32)) {
+    let key = (addr, format, width, height, packs);
+    let (texels, packed) = match (drawn, cache.checked(key, size as u32)) {
         (Some(_), _) => (Arc::from([]), None),
         (None, Some(decoded)) => decoded,
         (None, None) => {
@@ -1175,7 +1184,7 @@ fn bind_texture<M: GpuMemory>(
     let config = registers[base + 2];
     Some(BoundTexture {
         texels,
-        etc1,
+        packed,
         drawn,
         linear: config & 0x2 != 0,
         wrap_t: Wrap::from_raw(config >> 8),
@@ -2172,6 +2181,11 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     // it before it is read
     // one the GPU still holds it copies there
     let mut drawn: [Option<DrawnTexture>; 3] = [None; 3];
+    // the GPU samples textures packed, the software path decodes them
+    #[cfg(feature = "gles")]
+    let packs = resources.hardware.is_some();
+    #[cfg(not(feature = "gles"))]
+    let packs = false;
     #[cfg(feature = "gles")]
     if let Some(hardware) = resources.hardware.as_mut() {
         for (unit, drawn) in drawn.iter_mut().enumerate() {
@@ -2188,7 +2202,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
         }
     }
     let textures: [Option<BoundTexture>; 3] =
-        std::array::from_fn(|unit| bind_texture(registers, memory, &mut resources.textures, unit, drawn[unit]));
+        std::array::from_fn(|unit| bind_texture(registers, memory, &mut resources.textures, unit, drawn[unit], packs));
     let tex_env = crate::tev::TexEnv::read(registers);
     let state = DrawState {
         target: ColorTarget {
@@ -2339,8 +2353,8 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
             log::error!("the GPU could not write back its buffers, {error}");
         }
         // and on textures read from it, which the ones the GPU was to copy
-        // were not
-        if drawn.iter().any(Option::is_some) {
+        // were not, and decoded rather than packed for the GPU
+        if drawn.iter().any(Option::is_some) || state.textures.iter().flatten().any(|texture| texture.packed.is_some()) {
             let hardware = resources.hardware.take();
             let drawn = rasterize(registers, memory, resources, Vertices::Shaded(shaded));
             resources.hardware = hardware;
@@ -2665,7 +2679,7 @@ mod tests {
     fn clamp_to_border_reads_the_border_color() {
         let texture = |wrap: Wrap| BoundTexture {
             drawn: None,
-            etc1: None,
+            packed: None,
             texels: vec![[0xFF; 4]; 8 * 8].into(),
             linear: false,
             wrap_s: wrap,
@@ -2686,7 +2700,7 @@ mod tests {
     #[test]
     fn textures_are_checked_once_a_list_unless_written_over() {
         let mut cache = TextureCache::default();
-        let key = (0x7100_1000, TextureFormat::Rgba8, 8, 8);
+        let key = (0x7100_1000, TextureFormat::Rgba8, 8, 8, false);
         cache.begin_list();
         assert!(cache.checked(key, 256).is_none(), "never seen");
         cache.decoded(key, &[0x11; 256], crate::journal::now());
@@ -2707,7 +2721,7 @@ mod tests {
     #[test]
     fn the_texture_cache_notices_changed_bytes() {
         let mut cache = TextureCache::default();
-        let key = (0x1000, TextureFormat::Rgba8, 8, 8);
+        let key = (0x1000, TextureFormat::Rgba8, 8, 8, false);
         let first = cache.decoded(key, &[0x11; 256], 0).0;
         let again = cache.decoded(key, &[0x11; 256], 0).0;
         assert!(Arc::ptr_eq(&first, &again));

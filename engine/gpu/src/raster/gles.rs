@@ -17,6 +17,7 @@ use between::{Between, Step};
 use super::{color_words, BoundTexture, DepthMap, DrawnTexture, Screen, Wrap, COLOR_WORDS, TEXTURE_UNIT_BASES};
 use crate::blend::LogicOp;
 use crate::format::{morton_offset, ColorFormat};
+use crate::texture::Packing;
 use crate::lighting::Tables;
 use crate::proctex;
 
@@ -2706,7 +2707,7 @@ impl Ring {
 
 struct Texture {
     texture: glow::Texture,
-    _texels: (Arc<[[u8; 4]]>, Option<Arc<[u8]>>),
+    _texels: (Arc<[[u8; 4]]>, Option<crate::raster::Packed>),
     used: u64,
 }
 
@@ -5618,24 +5619,44 @@ impl Gles {
 
     fn texture(&mut self, bound: &BoundTexture) -> Result<glow::Texture, String> {
         let _timed = timed(6);
-        let key = bound.etc1.as_ref().map_or(Arc::as_ptr(&bound.texels) as *const u8, |blocks| Arc::as_ptr(blocks) as *const u8) as usize;
+        let key = bound.packed.as_ref().map_or(Arc::as_ptr(&bound.texels) as *const u8, |(_, bytes)| Arc::as_ptr(bytes) as *const u8) as usize;
         if let Some(texture) = self.textures.get_mut(&key) {
             texture.used = self.flushes;
             return Ok(texture.texture);
         }
         // its texels go up after the draws before
         let texture = self.texture_name()?;
-        let (gl, texels, etc1, width, height) = (self.gl, bound.texels.clone(), bound.etc1.clone(), bound.width as i32, bound.height as i32);
+        let (gl, texels, packed, width, height) = (self.gl, bound.texels.clone(), bound.packed.clone(), bound.width as i32, bound.height as i32);
         self.worker.post_keeping(move || {
             disturb();
             // SAFETY: on the GL thread, the name is new and the texels cover
             // the texture
             unsafe {
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                match etc1 {
-                    Some(blocks) => {
+                match packed {
+                    Some((Packing::Etc1, blocks)) => {
                         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, 0);
                         gl.compressed_tex_image_2d(glow::TEXTURE_2D, 0, ETC1_RGB8_OES as i32, width, height, 0, blocks.len() as i32, &blocks);
+                    }
+                    Some((packing, bytes)) => {
+                        use glow::{GREEN, ONE, RED, ZERO};
+                        let (internal, format, kind, swizzle) = match packing {
+                            Packing::Rgb565 => (glow::RGB565, glow::RGB, glow::UNSIGNED_SHORT_5_6_5, None),
+                            Packing::Rgba5551 => (glow::RGB5_A1, glow::RGBA, glow::UNSIGNED_SHORT_5_5_5_1, None),
+                            Packing::Rgba4 => (glow::RGBA4, glow::RGBA, glow::UNSIGNED_SHORT_4_4_4_4, None),
+                            Packing::Luminance => (glow::R8, glow::RED, glow::UNSIGNED_BYTE, Some([RED, RED, RED, ONE])),
+                            Packing::Alpha => (glow::R8, glow::RED, glow::UNSIGNED_BYTE, Some([ZERO, ZERO, ZERO, RED])),
+                            Packing::LuminanceAlpha => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE, Some([RED, RED, RED, GREEN])),
+                            Packing::Hilo => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE, Some([ZERO, RED, GREEN, ONE])),
+                            Packing::Etc1 => unreachable!(),
+                        };
+                        if let Some(swizzle) = swizzle {
+                            for (parameter, source) in [glow::TEXTURE_SWIZZLE_R, glow::TEXTURE_SWIZZLE_G, glow::TEXTURE_SWIZZLE_B, glow::TEXTURE_SWIZZLE_A].into_iter().zip(swizzle) {
+                                gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, source as i32);
+                            }
+                        }
+                        gl.tex_storage_2d(glow::TEXTURE_2D, 1, internal, width, height);
+                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width, height, format, kind, glow::PixelUnpackData::Slice(Some(&bytes)));
                     }
                     None => {
                         gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::RGBA8, width, height);
@@ -5644,7 +5665,7 @@ impl Gles {
                 }
             }
         });
-        self.textures.insert(key, Texture { texture, _texels: (bound.texels.clone(), bound.etc1.clone()), used: self.flushes });
+        self.textures.insert(key, Texture { texture, _texels: (bound.texels.clone(), bound.packed.clone()), used: self.flushes });
         Ok(texture)
     }
 

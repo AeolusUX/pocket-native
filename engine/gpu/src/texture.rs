@@ -93,6 +93,77 @@ pub fn etc1_blocks(data: &[u8], width: u32, height: u32) -> Vec<u8> {
     out
 }
 
+/// how a texture goes to a GPU at a size of its own rather than four bytes
+/// a texel: ETC1 as its blocks, the PICA's 16-bit formats as they are, and
+/// its luminance and alpha formats as one or two 8-bit channels the GPU
+/// spreads over RGBA itself, as decode_texels does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Packing {
+    Etc1,
+    Rgb565,
+    Rgba5551,
+    Rgba4,
+    /// one channel, read as (l, l, l, 1).
+    Luminance,
+    /// one channel, read as (0, 0, 0, a).
+    Alpha,
+    /// two channels, read as (l, l, l, a).
+    LuminanceAlpha,
+    /// two channels, read as (0, hi, lo, 1).
+    Hilo,
+}
+
+/// a texture packed for a GPU, row by row like decode_texels, when its
+/// format packs and it is whole tiles.
+pub fn pack_texels(data: &[u8], format: TextureFormat, width: u32, height: u32) -> Option<(Packing, Vec<u8>)> {
+    if !width.is_multiple_of(8) || !height.is_multiple_of(8) {
+        return None;
+    }
+    let (packing, bytes) = match format {
+        TextureFormat::Etc1 => return Some((Packing::Etc1, etc1_blocks(data, width, height))),
+        TextureFormat::Rgb565 => (Packing::Rgb565, 2),
+        TextureFormat::Rgba5551 => (Packing::Rgba5551, 2),
+        TextureFormat::Rgba4 => (Packing::Rgba4, 2),
+        TextureFormat::L8 | TextureFormat::L4 => (Packing::Luminance, 1),
+        TextureFormat::A8 | TextureFormat::A4 => (Packing::Alpha, 1),
+        TextureFormat::La8 | TextureFormat::La4 => (Packing::LuminanceAlpha, 2),
+        TextureFormat::Hilo8 => (Packing::Hilo, 2),
+        _ => return None,
+    };
+    let mut out = vec![0u8; (width * height) as usize * bytes];
+    let tiles_across = width / 8;
+    for tile in 0..tiles_across * (height / 8) {
+        let (tile_x, tile_y) = (tile % tiles_across * 8, tile / tiles_across * 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                let texel = (tile * 64 + morton_interleave(x, y)) as usize;
+                let at = ((tile_y + y) * width + tile_x + x) as usize * bytes;
+                let texel_out = &mut out[at..at + bytes];
+                match format {
+                    TextureFormat::L4 | TextureFormat::A4 => {
+                        let Some(&byte) = data.get(texel / 2) else { continue };
+                        texel_out[0] = expand4(if texel.is_multiple_of(2) { byte & 0xF } else { byte >> 4 });
+                    }
+                    TextureFormat::La4 => {
+                        let Some(&byte) = data.get(texel) else { continue };
+                        texel_out.copy_from_slice(&[expand4(byte >> 4), expand4(byte & 0xF)]);
+                    }
+                    // luminance or hi in the high byte
+                    TextureFormat::La8 | TextureFormat::Hilo8 => {
+                        let Some(b) = data.get(texel * 2..texel * 2 + 2) else { continue };
+                        texel_out.copy_from_slice(&[b[1], b[0]]);
+                    }
+                    _ => {
+                        let Some(b) = data.get(texel * bytes..(texel + 1) * bytes) else { continue };
+                        texel_out.copy_from_slice(b);
+                    }
+                }
+            }
+        }
+    }
+    Some((packing, out))
+}
+
 /// every texel as straight RGBA8, row by row, what sample_texel reads at
 /// each, worked out tile by tile and an ETC1 block's colors once a block.
 pub fn decode_texels(data: &[u8], format: TextureFormat, width: u32, height: u32) -> Vec<[u8; 4]> {
@@ -405,6 +476,42 @@ const fn expand6(v: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// a packed texture, read the way the GPU reads its format with the
+    /// channels spread as the packing says, is what decode_texels makes.
+    #[test]
+    fn packed_texels_read_as_decoded() {
+        let data: Vec<u8> = (0..1024u32).map(|i| (i * 37 + 11 ^ i >> 3) as u8).collect();
+        use TextureFormat::*;
+        for format in [Rgb565, Rgba5551, Rgba4, L8, A8, L4, A4, La8, La4, Hilo8] {
+            let size = (16 * 16 * format.bits_per_pixel() / 8) as usize;
+            let (packing, packed) = pack_texels(&data[..size], format, 16, 16).unwrap();
+            let decoded = decode_texels(&data[..size], format, 16, 16);
+            for (i, &want) in decoded.iter().enumerate() {
+                let word = |i: usize| u16::from_le_bytes([packed[i * 2], packed[i * 2 + 1]]);
+                let got = match packing {
+                    Packing::Rgb565 => {
+                        let v = word(i);
+                        [expand5((v >> 11) as u8 & 0x1F), expand6((v >> 5) as u8 & 0x3F), expand5(v as u8 & 0x1F), 0xFF]
+                    }
+                    Packing::Rgba5551 => {
+                        let v = word(i);
+                        [expand5((v >> 11) as u8 & 0x1F), expand5((v >> 6) as u8 & 0x1F), expand5((v >> 1) as u8 & 0x1F), if v & 1 != 0 { 0xFF } else { 0 }]
+                    }
+                    Packing::Rgba4 => {
+                        let v = word(i);
+                        [expand4((v >> 12) as u8 & 0xF), expand4((v >> 8) as u8 & 0xF), expand4((v >> 4) as u8 & 0xF), expand4(v as u8 & 0xF)]
+                    }
+                    Packing::Luminance => [packed[i], packed[i], packed[i], 0xFF],
+                    Packing::Alpha => [0, 0, 0, packed[i]],
+                    Packing::LuminanceAlpha => [packed[i * 2], packed[i * 2], packed[i * 2], packed[i * 2 + 1]],
+                    Packing::Hilo => [0, packed[i * 2], packed[i * 2 + 1], 0xFF],
+                    Packing::Etc1 => unreachable!(),
+                };
+                assert_eq!(got, want, "{format:?} texel {i}");
+            }
+        }
+    }
 
     /// decoding a whole texture gives what reading each texel does, for
     /// every format, short data included.
