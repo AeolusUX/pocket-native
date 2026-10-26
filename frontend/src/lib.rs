@@ -16,6 +16,7 @@
 //! writes a report of how it went, see probe.rs.
 
 mod busy;
+mod crash;
 mod font;
 pub mod input;
 mod layout;
@@ -103,10 +104,13 @@ pub fn run(mut args: Vec<String>) {
         let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
         // POCKET_NATIVE_LOG=file logs there in place of standard error, which
         // goes nowhere in an Android app
-        if let Some(file) = std::env::var_os("POCKET_NATIVE_LOG").and_then(|path| std::fs::File::create(path).ok()) {
+        let file = std::env::var_os("POCKET_NATIVE_LOG").and_then(|path| std::fs::File::create(path).ok());
+        let crash_log = file.as_ref().and_then(|file| file.try_clone().ok()).map(std::os::fd::IntoRawFd::into_raw_fd);
+        if let Some(file) = file {
             logger.target(env_logger::Target::Pipe(Box::new(file)));
         }
         logger.init();
+        crash::watch(crash_log);
         // a note from a program around the frontend, which has no log of its own
         if let Ok(note) = std::env::var("POCKET_NATIVE_NOTE") {
             log::info!("{note}");
