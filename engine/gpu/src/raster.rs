@@ -945,12 +945,13 @@ impl TextureCache {
             self.texels = 0;
         }
         // a GPU that samples the PICA's smaller formats gets them as they
-        // are, ETC1 compressed and the rest at 1 or 2 bytes a texel, where
-        // RGBA8 is 4 to 8 times the memory, here and on the GPU
+        // are, ETC1 compressed, ETC1A4 so with its alpha a byte a texel
+        // apart, and the rest at 1 or 2 bytes a texel, where RGBA8 is 2 to 8
+        // times the memory, here and on the GPU
         let packed = packs
             .then(|| crate::texture::pack_texels(data, format, width, height))
             .flatten()
-            .filter(|&(packing, _)| packing != crate::texture::Packing::Etc1 || SAMPLES_ETC1.load(std::sync::atomic::Ordering::Relaxed))
+            .filter(|&(packing, _)| !matches!(packing, crate::texture::Packing::Etc1 | crate::texture::Packing::Etc1A4) || SAMPLES_ETC1.load(std::sync::atomic::Ordering::Relaxed))
             .map(|(packing, bytes)| (packing, Arc::from(bytes)));
         let texels: Arc<[[u8; 4]]> = match packed {
             Some(_) => Arc::from([]),

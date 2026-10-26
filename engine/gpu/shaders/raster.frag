@@ -58,6 +58,10 @@ layout(constant_id = 29) const uint DYNAMIC = 0u;
 layout(set = 0, binding = 0) uniform sampler2D texture0;
 layout(set = 0, binding = 1) uniform sampler2D texture1;
 layout(set = 0, binding = 2) uniform sampler2D texture2;
+// ETC1A4's alpha, which the GPU's ETC1 leaves out
+layout(set = 0, binding = 3) uniform sampler2D alpha0;
+layout(set = 0, binding = 4) uniform sampler2D alpha1;
+layout(set = 0, binding = 5) uniform sampler2D alpha2;
 
 struct Light {
     vec4 specular0;
@@ -163,6 +167,15 @@ vec4 sample_unit(uint unit, vec2 uv) {
         if (border_s || border_t) {
             return unpack_color(units[unit].y);
         }
+    }
+    // bit 24 on for each unit with its alpha apart
+    if (DYNAMIC != 0u ? units[unit].w != 0u : (TEXTURE_CONFIG & (0x1000000u << unit)) != 0u) {
+        if (unit == 0u) {
+            return vec4(texture(texture0, st).rgb, texture(alpha0, st).r);
+        } else if (unit == 1u) {
+            return vec4(texture(texture1, st).rgb, texture(alpha1, st).r);
+        }
+        return vec4(texture(texture2, st).rgb, texture(alpha2, st).r);
     }
     if (unit == 0u) {
         return texture(texture0, st);

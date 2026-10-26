@@ -75,21 +75,33 @@ impl TextureFormat {
 /// reads one texel as straight RGBA8.
 /// an ETC1 texture as the standard blocks a GPU samples itself, row by row
 /// of blocks in the order the texels are decoded, each big-endian. the PICA
-/// keeps them four to an 8x8 tile, little-endian.
-pub fn etc1_blocks(data: &[u8], width: u32, height: u32) -> Vec<u8> {
+/// keeps them four to an 8x8 tile, little-endian, an ETC1A4 block after its
+/// alpha, which follows the blocks here a byte a texel, row by row.
+pub fn etc1_blocks(data: &[u8], width: u32, height: u32, alpha: bool) -> Vec<u8> {
+    let size = if alpha { 16 } else { 8 };
     let mut out = Vec::with_capacity((width * height / 2) as usize);
+    let mut alphas = vec![0u8; if alpha { (width * height) as usize } else { 0 }];
     for by in 0..height / 4 {
         for bx in 0..width / 4 {
             let tile = (by / 2) * (width / 8).max(1) + bx / 2;
-            let at = ((tile * 4 + bx % 2 + 2 * (by % 2)) * 8) as usize;
-            let mut block = [0u8; 8];
-            if let Some(source) = data.get(at..at + 8) {
-                block.copy_from_slice(source);
+            let at = ((tile * 4 + bx % 2 + 2 * (by % 2)) * size) as usize;
+            let mut block = [0u8; 16];
+            if let Some(source) = data.get(at..at + size as usize) {
+                block[..size as usize].copy_from_slice(source);
             }
-            block.reverse();
-            out.extend_from_slice(&block);
+            let (texels, color) = block[..size as usize].split_at_mut(size as usize - 8);
+            color.reverse();
+            out.extend_from_slice(color);
+            if alpha {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        alphas[((by * 4 + y) * width + bx * 4 + x) as usize] = decode_etc1a4_alpha(texels, x, y);
+                    }
+                }
+            }
         }
     }
+    out.extend(alphas);
     out
 }
 
@@ -100,6 +112,8 @@ pub fn etc1_blocks(data: &[u8], width: u32, height: u32) -> Vec<u8> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Packing {
     Etc1,
+    /// ETC1's blocks, then the alpha a byte a texel.
+    Etc1A4,
     Rgb565,
     Rgba5551,
     Rgba4,
@@ -120,7 +134,8 @@ pub fn pack_texels(data: &[u8], format: TextureFormat, width: u32, height: u32) 
         return None;
     }
     let (packing, bytes) = match format {
-        TextureFormat::Etc1 => return Some((Packing::Etc1, etc1_blocks(data, width, height))),
+        TextureFormat::Etc1 => return Some((Packing::Etc1, etc1_blocks(data, width, height, false))),
+        TextureFormat::Etc1A4 => return Some((Packing::Etc1A4, etc1_blocks(data, width, height, true))),
         TextureFormat::Rgb565 => (Packing::Rgb565, 2),
         TextureFormat::Rgba5551 => (Packing::Rgba5551, 2),
         TextureFormat::Rgba4 => (Packing::Rgba4, 2),
@@ -506,11 +521,25 @@ mod tests {
                     Packing::Alpha => [0, 0, 0, packed[i]],
                     Packing::LuminanceAlpha => [packed[i * 2], packed[i * 2], packed[i * 2], packed[i * 2 + 1]],
                     Packing::Hilo => [0, packed[i * 2], packed[i * 2 + 1], 0xFF],
-                    Packing::Etc1 => unreachable!(),
+                    Packing::Etc1 | Packing::Etc1A4 => unreachable!(),
                 };
                 assert_eq!(got, want, "{format:?} texel {i}");
             }
         }
+    }
+
+    /// ETC1A4 packs as its color blocks would as ETC1, then each texel's
+    /// alpha as decoded.
+    #[test]
+    fn etc1a4_packs_as_etc1_and_its_alpha() {
+        let data: Vec<u8> = (0..16 * 16u32).map(|i| (i * 37 + 11 ^ i >> 3) as u8).collect();
+        let color: Vec<u8> = data.chunks(16).flat_map(|block| block[8..].to_vec()).collect();
+        let (packing, packed) = pack_texels(&data, TextureFormat::Etc1A4, 16, 16).unwrap();
+        assert_eq!(packing, Packing::Etc1A4);
+        let (_, blocks) = pack_texels(&color, TextureFormat::Etc1, 16, 16).unwrap();
+        assert_eq!(&packed[..blocks.len()], &blocks[..]);
+        let alpha: Vec<u8> = decode_texels(&data, TextureFormat::Etc1A4, 16, 16).iter().map(|texel| texel[3]).collect();
+        assert_eq!(&packed[blocks.len()..], &alpha[..]);
     }
 
     /// decoding a whole texture gives what reading each texel does, for

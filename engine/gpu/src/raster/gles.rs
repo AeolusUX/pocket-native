@@ -2662,7 +2662,7 @@ struct Cached {
     depth: Option<Option<u32>>,
     depth_mask: Option<bool>,
     stencil: Option<Option<(u32, u32, u32)>>,
-    units: [Option<(glow::Texture, Option<glow::Sampler>)>; 3],
+    units: [Option<(glow::Texture, Option<glow::Sampler>)>; 6],
     tables_bound: Option<usize>,
     viewport: Option<[i32; 4]>,
     cull: Option<u32>,
@@ -2785,6 +2785,8 @@ impl Ring {
 
 struct Texture {
     texture: glow::Texture,
+    /// ETC1A4's alpha, which ETC1 leaves out.
+    alpha: Option<glow::Texture>,
     _texels: (Arc<[[u8; 4]]>, Option<crate::raster::Packed>),
     used: u64,
 }
@@ -2907,7 +2909,8 @@ struct DrawJob {
     depth: Option<u32>,
     depth_mask: bool,
     stencil: Option<(u32, u32, bool)>,
-    bound: [(glow::Texture, Option<glow::Sampler>); 3],
+    /// the units' textures, then ETC1A4's alphas.
+    bound: [(glow::Texture, Option<glow::Sampler>); 6],
     uniforms: Vec<u32>,
     vertex_array: glow::VertexArray,
     shaded_array: glow::VertexArray,
@@ -5763,7 +5766,7 @@ impl Gles {
         self.textures.retain(|_, texture| {
             let keep = flushes - texture.used < TEXTURE_KEEP_FLUSHES;
             if !keep {
-                gone.push(texture.texture);
+                gone.extend([Some(texture.texture), texture.alpha].into_iter().flatten());
             }
             keep
         });
@@ -6034,15 +6037,19 @@ impl Gles {
         Ok(())
     }
 
-    fn texture(&mut self, bound: &BoundTexture) -> Result<glow::Texture, String> {
+    fn texture(&mut self, bound: &BoundTexture) -> Result<(glow::Texture, Option<glow::Texture>), String> {
         let _timed = timed(6);
         let key = bound.packed.as_ref().map_or(Arc::as_ptr(&bound.texels) as *const u8, |(_, bytes)| Arc::as_ptr(bytes) as *const u8) as usize;
         if let Some(texture) = self.textures.get_mut(&key) {
             texture.used = self.flushes;
-            return Ok(texture.texture);
+            return Ok((texture.texture, texture.alpha));
         }
         // its texels go up after the draws before
         let texture = self.texture_name()?;
+        let alpha = match bound.packed {
+            Some((Packing::Etc1A4, _)) => Some(self.texture_name()?),
+            _ => None,
+        };
         let (gl, texels, packed, width, height) = (self.gl, bound.texels.clone(), bound.packed.clone(), bound.width as i32, bound.height as i32);
         self.worker.post_keeping(move || {
             disturb();
@@ -6051,9 +6058,15 @@ impl Gles {
             unsafe {
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                 match packed {
-                    Some((Packing::Etc1, blocks)) => {
+                    Some((packing @ (Packing::Etc1 | Packing::Etc1A4), blocks)) => {
+                        let (blocks, alphas) = blocks.split_at((width * height / 2) as usize);
                         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, 0);
-                        gl.compressed_tex_image_2d(glow::TEXTURE_2D, 0, ETC1_RGB8_OES as i32, width, height, 0, blocks.len() as i32, &blocks);
+                        gl.compressed_tex_image_2d(glow::TEXTURE_2D, 0, ETC1_RGB8_OES as i32, width, height, 0, blocks.len() as i32, blocks);
+                        if let (Packing::Etc1A4, Some(alpha)) = (packing, alpha) {
+                            gl.bind_texture(glow::TEXTURE_2D, Some(alpha));
+                            gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::R8, width, height);
+                            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, width, height, glow::RED, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(alphas)));
+                        }
                     }
                     Some((packing, bytes)) => {
                         use glow::{GREEN, ONE, RED, ZERO};
@@ -6065,7 +6078,7 @@ impl Gles {
                             Packing::Alpha => (glow::R8, glow::RED, glow::UNSIGNED_BYTE, Some([ZERO, ZERO, ZERO, RED])),
                             Packing::LuminanceAlpha => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE, Some([RED, RED, RED, GREEN])),
                             Packing::Hilo => (glow::RG8, glow::RG, glow::UNSIGNED_BYTE, Some([ZERO, RED, GREEN, ONE])),
-                            Packing::Etc1 => unreachable!(),
+                            Packing::Etc1 | Packing::Etc1A4 => unreachable!(),
                         };
                         if let Some(swizzle) = swizzle {
                             for (parameter, source) in [glow::TEXTURE_SWIZZLE_R, glow::TEXTURE_SWIZZLE_G, glow::TEXTURE_SWIZZLE_B, glow::TEXTURE_SWIZZLE_A].into_iter().zip(swizzle) {
@@ -6082,8 +6095,8 @@ impl Gles {
                 }
             }
         });
-        self.textures.insert(key, Texture { texture, _texels: (bound.texels.clone(), bound.packed.clone()), used: self.flushes });
-        Ok(texture)
+        self.textures.insert(key, Texture { texture, alpha, _texels: (bound.texels.clone(), bound.packed.clone()), used: self.flushes });
+        Ok((texture, alpha))
     }
 
     fn sampler(&mut self, linear: bool, s: Wrap, t: Wrap) -> Result<glow::Sampler, String> {
@@ -6259,9 +6272,9 @@ impl Gles {
         };
         let (bottom, top) = (bottom + raise, top + raise);
 
-        let mut bound = [(self.blank, None); 3];
+        let mut bound = [(self.blank, None); 6];
         let mut sources = [None; 3];
-        let mut enabled = 0;
+        let (mut enabled, mut split) = (0, 0);
         for (unit, texture) in draw.textures.iter().enumerate() {
             if let Some(texture) = texture {
                 let sampler = self.sampler(texture.linear, texture.wrap_s, texture.wrap_t)?;
@@ -6274,7 +6287,14 @@ impl Gles {
                         }
                         None => self.copy_texture(memory, drawn)?,
                     },
-                    None => self.texture(texture)?,
+                    None => {
+                        let (image, alpha) = self.texture(texture)?;
+                        if let Some(alpha) = alpha {
+                            bound[3 + unit] = (alpha, Some(sampler));
+                            split |= 1 << unit;
+                        }
+                        image
+                    }
                 };
                 bound[unit] = (image, Some(sampler));
                 enabled |= 1 << unit;
@@ -6299,7 +6319,7 @@ impl Gles {
         // on the console until a list changes them, and so are the words
         static CHECK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let check = *CHECK.get_or_init(|| crate::switch("ZAKURO_CHECK_REUSE", "reused colour words checked"));
-        let key = (draw.fragment_state, enabled, sources.map(|source| source.is_some()), shaded, writes_depth, vertex);
+        let key = (draw.fragment_state, enabled | split << 4, sources.map(|source| source.is_some()), shaded, writes_depth, vertex);
         let same = self.fragment.as_ref().is_some_and(|(last, ..)| *last == key);
         let (words, program) = if same && !check {
             let (_, last, program) = self.fragment.as_ref().expect("the last draw's");
@@ -6313,8 +6333,8 @@ impl Gles {
             }
             let texture_config = (r[REG_TEXTURE_CONFIG] & !7) | enabled;
             words.extend([r[REG_UPDATE_BUFFER], r[REG_BUFFER_COLOR], r[REG_ALPHA_TEST], texture_config]);
-            for (base, source) in TEXTURE_UNIT_BASES.into_iter().zip(sources) {
-                words.extend([r[base + 2], r[base], source.is_some() as u32, 0]);
+            for (unit, (base, source)) in TEXTURE_UNIT_BASES.into_iter().zip(sources).enumerate() {
+                words.extend([r[base + 2], r[base], source.is_some() as u32, split >> unit & 1]);
             }
             let depth_flags = depth_map.w_buffer as u32 | (shaded as u32) << 1;
             words.extend([depth_flags, draw.lighting.is_some() as u32, depth_map.scale.to_bits(), depth_map.offset.to_bits()]);
@@ -6342,6 +6362,7 @@ impl Gles {
                 let unbordered = enabled & 1 << unit != 0 && (config >> 8) & 3 != 1 && (config >> 12) & 3 != 1;
                 constants[25] |= (source.is_some() as u32) << (16 + unit) | (unbordered as u32) << (20 + unit);
             }
+            constants[25] |= split << 24;
             constants[26] = draw.lighting.is_some() as u32;
             constants[27] = r[REG_ALPHA_TEST] & 0x71 | unused_outputs(r);
             constants[28] = depth_flags | if writes_depth { WRITES_DEPTH } else { 0 };
