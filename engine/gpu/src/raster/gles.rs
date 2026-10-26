@@ -816,6 +816,43 @@ pub(crate) const COMPILING: &str = "its program is compiling";
 
 /// the generic fragment program's constants, which draws whatever the
 /// combination through uniforms.
+/// the registers fragment_constants reads, which the manifest keeps whole,
+/// so a later build works its own constants out from them.
+fn key_registers() -> impl Iterator<Item = usize> {
+    STAGE_REGISTERS
+        .into_iter()
+        .flat_map(|base| [base, base + 1, base + 2, base + 4])
+        .chain(TEXTURE_UNIT_BASES.map(|base| base + 2))
+        .chain([REG_UPDATE_BUFFER, REG_TEXTURE_CONFIG, REG_ALPHA_TEST, REG_COLOR_OPERATION, REG_BLEND_FUNC, REG_LOGIC_OP, REG_DEPTH_COLOR_MASK, REG_COLOR_BUFFER_WRITE])
+        .chain(crate::lighting::SHAPE_REGISTERS)
+}
+
+/// a draw's fragment program as its constants and its lighting's shape,
+/// from its registers, the units enabled, those with their alpha apart and
+/// those reading a drawing in place, how its depth goes, and its lighting
+/// as the uniform block packs it.
+fn fragment_constants(r: &[u32], enabled: u32, split: u32, sources: [bool; 3], depth_flags: u32, writes_depth: bool, lighting: Option<&[u32]>) -> ([u32; FRAGMENT_CONSTANTS], Vec<u32>) {
+    let mut constants = [0u32; FRAGMENT_CONSTANTS];
+    for (i, base) in STAGE_REGISTERS.into_iter().enumerate() {
+        constants[i] = r[base] & 0x0FFF_0FFF;
+        constants[6 + i] = r[base + 1] & 0x0077_7FFF;
+        constants[12 + i] = r[base + 2] & 0x000F_000F;
+        constants[18 + i] = r[base + 4] & 0x0003_0003;
+    }
+    // the buffer updates, and the fog's mode and which way its depth runs
+    constants[24] = r[REG_UPDATE_BUFFER] & 0x1_FF07;
+    constants[25] = ((r[REG_TEXTURE_CONFIG] & !7) | enabled) & 0x2707 | split << 24;
+    for (unit, base) in TEXTURE_UNIT_BASES.into_iter().enumerate() {
+        let config = r[base + 2];
+        let unbordered = enabled & 1 << unit != 0 && (config >> 8) & 3 != 1 && (config >> 12) & 3 != 1;
+        constants[25] |= (sources[unit] as u32) << (16 + unit) | (unbordered as u32) << (20 + unit);
+    }
+    constants[26] = lighting.is_some() as u32;
+    constants[27] = r[REG_ALPHA_TEST] & 0x71 | unused_outputs(r);
+    constants[28] = depth_flags | if writes_depth { WRITES_DEPTH } else { 0 };
+    (constants, lighting.map_or_else(Vec::new, lighting_shape))
+}
+
 fn generic_constants(constants: &[u32; FRAGMENT_CONSTANTS]) -> [u32; FRAGMENT_CONSTANTS] {
     let mut generic = [0u32; FRAGMENT_CONSTANTS];
     generic[25] = constants[25] & 0x400;
@@ -825,8 +862,7 @@ fn generic_constants(constants: &[u32; FRAGMENT_CONSTANTS]) -> [u32; FRAGMENT_CO
     generic
 }
 
-fn lighting_shape(words: &[u32]) -> Vec<u32> {
-    let w = &words[LIGHTING_BASE..];
+fn lighting_shape(w: &[u32]) -> Vec<u32> {
     let count = w[1] as usize;
     let mut shape = Vec::with_capacity(29 + count * 2);
     shape.extend_from_slice(&w[..8]);
@@ -3779,6 +3815,8 @@ pub struct Gles {
     vertex_sources: HashMap<u64, String>,
     /// what each translation came from, for the manifest.
     vertex_inputs: HashMap<u64, (u64, u32, [u32; SEMANTICS])>,
+    /// what each program being made came from, for the manifest.
+    inputs: HashMap<ProgramKey, String>,
     shaded_array: glow::VertexArray,
     generic: bool,
     vertex_array: glow::VertexArray,
@@ -3885,6 +3923,7 @@ impl Gles {
                 translated: Default::default(),
                 vertex_sources: HashMap::new(),
                 vertex_inputs: HashMap::new(),
+                inputs: HashMap::new(),
                 shaded_array,
                 generic: crate::switch("ZAKURO_GENERIC_SHADERS", "generic shaders"),
                 vertex_array,
@@ -3937,7 +3976,7 @@ impl Gles {
                     constants[25] = unbordered;
                     constants[26] = lighting;
                     constants[28] = if writes_depth { WRITES_DEPTH } else { 0 };
-                    let _ = self.program(&generic_constants(&constants), writes_depth, &[], 0, false);
+                    let _ = self.program(&generic_constants(&constants), writes_depth, &[], 0, false, None);
                 }
             }
         }
@@ -3980,18 +4019,21 @@ impl Gles {
                 }
                 None => continue,
             };
-            let mut words = fields.map(|word| u32::from_str_radix(word, 16));
-            let Some(Ok(writes_depth)) = words.next() else { continue };
-            let words: Vec<u32> = words.filter_map(Result::ok).collect();
-            if words.len() < FRAGMENT_CONSTANTS {
-                continue;
+            let Some(Ok(flags)) = fields.next().map(|field| u32::from_str_radix(field, 16)) else { continue };
+            let mut r = [0u32; 0x300];
+            for (register, value) in fields.filter_map(|field| field.split_once('=')) {
+                if let (Ok(register @ 0..0x300), Ok(value)) = (usize::from_str_radix(register, 16), u32::from_str_radix(value, 16)) {
+                    r[register] = value;
+                }
             }
-            let (constants, lighting) = words.split_at(FRAGMENT_CONSTANTS);
-            if !lighting.is_empty() && (lighting.len() < 29 || lighting.len() != 29 + 2 * lighting[1] as usize) {
-                continue;
+            let mut packed = Vec::new();
+            if flags & 1 << 17 != 0 {
+                let Some(lighting) = crate::lighting::Lighting::read(&r) else { continue };
+                lighting.pack(&mut packed);
             }
-            let Ok(constants) = <[u32; FRAGMENT_CONSTANTS]>::try_from(constants) else { continue };
-            match self.program(&constants, writes_depth != 0, lighting, vertex, true) {
+            let (writes_depth, sources) = (flags & 1 << 16 != 0, std::array::from_fn(|unit| flags & 1 << (8 + unit) != 0));
+            let (constants, lighting) = fragment_constants(&r, flags & 7, flags >> 4 & 7, sources, flags >> 12 & 3, writes_depth, (flags & 1 << 17 != 0).then_some(&packed[..]));
+            match self.program(&constants, writes_depth, &lighting, vertex, true, None) {
                 Ok(_) => count += 1,
                 Err(error) => log::warn!("could not prepare a shader from {}, {error}", path.display()),
             }
@@ -5023,7 +5065,7 @@ impl Gles {
 
     /// the program for a draw, none while the compiler thread is still
     /// making it, unless wait.
-    fn program(&mut self, constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, lighting: &[u32], vertex: u64, wait: bool) -> Result<Option<glow::Program>, String> {
+    fn program(&mut self, constants: &[u32; FRAGMENT_CONSTANTS], writes_depth: bool, lighting: &[u32], vertex: u64, wait: bool, inputs: Option<&dyn Fn() -> String>) -> Result<Option<glow::Program>, String> {
         let key = (*constants, writes_depth, lighting.to_vec(), vertex);
         if let Some(&program) = self.programs.get(&key) {
             return Ok(Some(program));
@@ -5065,6 +5107,9 @@ impl Gles {
         };
         let compiled = if crate::fast_with(crate::speedup::PLAIN_MATH) { plain_multiplies(&vertex_source) } else { vertex_source };
         let cached = program_cache_path(&self.name, &compiled, &fragment);
+        if let Some(inputs) = inputs {
+            self.inputs.insert(key.clone(), inputs());
+        }
         if !wait && !self.preloading {
             if let Some(compiler) = self.compiler.as_mut() {
                 compiler.pending.insert(key.clone());
@@ -5077,7 +5122,7 @@ impl Gles {
         if !self.worker.here() {
             let worker = self.worker.clone();
             wait_from("program");
-            return worker.run(|| self.program(constants, writes_depth, lighting, vertex, wait));
+            return worker.run(|| self.program(constants, writes_depth, lighting, vertex, wait, None));
         }
         disturb();
         let program = build_program(&self.gl, &compiled, &fragment, cached.as_deref())?;
@@ -5109,6 +5154,7 @@ impl Gles {
                 }
                 Err(error) => {
                     log::warn!("{error}");
+                    self.inputs.remove(&key);
                     if key.3 != 0 {
                         for translation in self.translated.values_mut() {
                             if *translation == Some(key.3) {
@@ -5124,11 +5170,12 @@ impl Gles {
 
     /// writes a new program the title used into the manifest, for the next
     /// run to prepare at startup.
-    fn note_program(&self, key: &ProgramKey) {
-        let (constants, writes_depth, lighting, vertex) = (&key.0, key.1, &key.2, key.3);
-        if self.preloading || constants[29] != 0 {
+    fn note_program(&mut self, key: &ProgramKey) {
+        let Some(inputs) = self.inputs.remove(key) else { return };
+        if self.preloading || key.0[29] != 0 {
             return;
         }
+        let vertex = key.3;
         let Some(path) = manifest_path() else { return };
         let vertex = match vertex {
             0 => "0".to_owned(),
@@ -5137,8 +5184,7 @@ impl Gles {
                 [*fingerprint, *entry as u64].into_iter().chain(semantics.iter().map(|&value| value as u64)).map(|value| format!("{value:x}")).collect::<Vec<_>>().join(":")
             }
         };
-        let words = std::iter::once(writes_depth as u32).chain(constants.iter().copied()).chain(lighting.iter().copied());
-        let line = std::iter::once(vertex).chain(words.map(|word| format!("{word:x}"))).collect::<Vec<_>>().join(" ");
+        let line = format!("{vertex} {inputs}");
         let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
             use std::io::Write;
             let new = !path.exists();
@@ -6376,42 +6422,27 @@ impl Gles {
             words.extend(color_words(r));
             words.extend([r[crate::fog::REG_COLOR], 0, 0, 0]);
 
-            let mut constants = [0u32; FRAGMENT_CONSTANTS];
-            for (i, base) in STAGE_REGISTERS.into_iter().enumerate() {
-                constants[i] = r[base] & 0x0FFF_0FFF;
-                constants[6 + i] = r[base + 1] & 0x0077_7FFF;
-                constants[12 + i] = r[base + 2] & 0x000F_000F;
-                constants[18 + i] = r[base + 4] & 0x0003_0003;
-            }
-            // the buffer updates, and the fog's mode and which way its depth runs
-            constants[24] = r[REG_UPDATE_BUFFER] & 0x1_FF07;
-            constants[25] = texture_config & 0x2707;
-            for (unit, (base, source)) in TEXTURE_UNIT_BASES.into_iter().zip(sources).enumerate() {
-                let config = r[base + 2];
-                let unbordered = enabled & 1 << unit != 0 && (config >> 8) & 3 != 1 && (config >> 12) & 3 != 1;
-                constants[25] |= (source.is_some() as u32) << (16 + unit) | (unbordered as u32) << (20 + unit);
-            }
-            constants[25] |= split << 24;
-            constants[26] = draw.lighting.is_some() as u32;
-            constants[27] = r[REG_ALPHA_TEST] & 0x71 | unused_outputs(r);
-            constants[28] = depth_flags | if writes_depth { WRITES_DEPTH } else { 0 };
+            let sources = sources.map(|source| source.is_some());
+            let (mut constants, mut lighting) = fragment_constants(r, enabled, split, sources, depth_flags, writes_depth, draw.lighting.map(|_| &words[LIGHTING_BASE..]));
             if self.generic {
                 constants = generic_constants(&constants);
             }
             static GENERIC_LIGHTING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            let lighting = if draw.lighting.is_some() && !self.generic && !*GENERIC_LIGHTING.get_or_init(|| crate::switch("ZAKURO_GENERIC_LIGHTING", "generic lighting")) {
-                lighting_shape(&words)
-            } else {
-                Vec::new()
-            };
+            if self.generic || *GENERIC_LIGHTING.get_or_init(|| crate::switch("ZAKURO_GENERIC_LIGHTING", "generic lighting")) {
+                lighting.clear();
+            }
+            // what the manifest keeps of the draw, for a later run to work
+            // the program out from again
+            let flags = enabled | split << 4 | sources.into_iter().enumerate().map(|(unit, source)| (source as u32) << (8 + unit)).sum::<u32>() | depth_flags << 12 | (writes_depth as u32) << 16 | (draw.lighting.is_some() as u32) << 17;
+            let inputs = || std::iter::once(format!("{flags:x}")).chain(key_registers().filter(|&register| r[register] != 0).map(|register| format!("{register:x}={:x}", r[register]))).collect::<Vec<_>>().join(" ");
             let mut exact = true;
-            let program = match self.program(&constants, writes_depth, &lighting, vertex, false) {
+            let program = match self.program(&constants, writes_depth, &lighting, vertex, false, Some(&inputs)) {
                 Ok(Some(program)) => program,
                 // shaded on the CPU meanwhile
                 Ok(None) if vertex != 0 => return Err(COMPILING.to_owned()),
                 Ok(None) => {
                     exact = false;
-                    self.program(&generic_constants(&constants), writes_depth, &[], 0, true)?.ok_or("no generic program")?
+                    self.program(&generic_constants(&constants), writes_depth, &[], 0, true, None)?.ok_or("no generic program")?
                 }
                 Err(error) => {
                     if vertex != 0 {
