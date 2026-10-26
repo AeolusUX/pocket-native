@@ -953,6 +953,14 @@ impl Gpu {
         let _ = (shown, cursor, overlays, smooth, interpolate, frames);
     }
 
+    /// lets the host GPU's threads finish, for the process to end.
+    pub fn stop_hardware(&mut self) {
+        #[cfg(feature = "gles")]
+        if let Some(hardware) = self.resources.hardware.as_mut().or(self.panel.as_mut()) {
+            hardware.stop();
+        }
+    }
+
     /// how many times the console's resolution the host's GPU draws at, 1
     /// when drawing in software.
     pub fn scale(&self) -> u32 {

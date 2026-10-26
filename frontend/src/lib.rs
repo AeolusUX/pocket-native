@@ -607,10 +607,13 @@ pub fn run(mut args: Vec<String>) {
         profiler::dump(&std::env::temp_dir().join("zakuro-host-profile.txt"));
     }
     if let Some(probe) = probe {
-        std::process::exit(probe.report(&mut system, &path, title_id, !profile.name.is_empty(), frame_number, stopped));
+        let code = probe.report(&mut system, &path, title_id, !profile.name.is_empty(), frame_number, stopped);
+        system.stop_gpu();
+        std::process::exit(code);
     }
     settings::save(&settings_path, &settings);
     settings::save(&game_path, &game);
+    system.stop_gpu();
     if let Some(before) = BEFORE_EXIT.get() {
         before(exit_code);
     }

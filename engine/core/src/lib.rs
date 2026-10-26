@@ -765,6 +765,12 @@ impl System {
         let _ = queue.jobs.send(Box::new(job));
     }
 
+    /// lets the GPU's threads finish, for the process to end.
+    pub fn stop_gpu(&mut self) {
+        self.gpu_work(&[], |gpu, _, _| gpu.stop_hardware());
+        self.wait_gpu();
+    }
+
     /// waits for the GPU thread to finish everything given to it, so the
     /// GPU's state can be looked at, and raises what it finished.
     pub fn wait_gpu(&mut self) {

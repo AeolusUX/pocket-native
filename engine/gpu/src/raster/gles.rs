@@ -3588,6 +3588,7 @@ struct Compile {
 /// driver's compiler.
 struct Compiler {
     jobs: std::sync::mpsc::Sender<Compile>,
+    thread: thread::JoinHandle<()>,
     done: std::sync::mpsc::Receiver<(ProgramKey, Result<glow::Program, String>)>,
     pending: rustc_hash::FxHashSet<ProgramKey>,
     failed: rustc_hash::FxHashMap<ProgramKey, String>,
@@ -3601,7 +3602,7 @@ impl Compiler {
         let (jobs, received) = std::sync::mpsc::channel::<Compile>();
         let (finished, done) = std::sync::mpsc::channel();
         let (ready, started) = std::sync::mpsc::channel();
-        thread::Builder::new()
+        let thread = thread::Builder::new()
             .name("gles-compiler".into())
             .spawn(move || {
                 let Some(gl) = egl.shared_context() else {
@@ -3622,7 +3623,7 @@ impl Compiler {
                 }
             })
             .ok()?;
-        started.recv().unwrap_or(false).then(|| Compiler { jobs, done, pending: Default::default(), failed: Default::default() })
+        started.recv().unwrap_or(false).then(|| Compiler { jobs, thread, done, pending: Default::default(), failed: Default::default() })
     }
 }
 
@@ -6604,6 +6605,17 @@ impl Gles {
         };
         self.worker.post_draw(job, self.gl);
         Ok(())
+    }
+
+    /// lets the compiler thread end after the program it builds, and the GL
+    /// thread finish what it was sent, before the process ends: the driver's
+    /// exit freeing what a build still used corrupted the heap.
+    pub fn stop(&mut self) {
+        if let Some(Compiler { jobs, thread, done, .. }) = self.compiler.take() {
+            drop((jobs, done));
+            let _ = thread.join();
+        }
+        self.worker.run(|| ());
     }
 
     /// sends the draws held back.
