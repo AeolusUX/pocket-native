@@ -608,7 +608,7 @@ fn pooled<T: Send + 'static>(worker: &Worker, gl: GlRef, (pool, coming): (&mut V
     }
     if pool.len() < 32 && coming.is_none() {
         let (send, receiver) = std::sync::mpsc::channel();
-        worker.post_keeping(move || drop(send.send((0..64).filter_map(|_| make(&gl)).collect::<Vec<_>>())));
+        worker.post_now(move || drop(send.send((0..64).filter_map(|_| make(&gl)).collect::<Vec<_>>())));
         *coming = Some(receiver);
     }
     if pool.is_empty() {
@@ -3600,11 +3600,17 @@ struct Worker {
     jobs: std::sync::mpsc::Sender<(bool, Job)>,
     thread: ThreadId,
     /// draws waiting to go over together, one wakeup for many
-    held: std::sync::Mutex<Vec<(DrawJob, GlRef)>>,
+    held: std::sync::Mutex<Vec<Held>>,
+}
+
+/// a draw, or work between draws.
+enum Held {
+    Draw(DrawJob, GlRef),
+    Job(Job),
 }
 
 /// the lists of draws sent over, handed back empty to be filled again.
-static DRAWN: Pool<(DrawJob, GlRef)> = Pool::new();
+static DRAWN: Pool<Held> = Pool::new();
 
 impl Worker {
     fn start() -> Result<(Worker, GlRef, Option<Compiler>), String> {
@@ -3658,8 +3664,25 @@ impl Worker {
         thread::current().id() == self.thread
     }
 
-    /// posts work that touches no surface, the clears left for draws stay.
+    /// posts work that touches no surface, the clears left for draws stay,
+    /// in among the draws held when there are some rather than sending them
+    /// off short.
     fn post_keeping(&self, job: impl FnOnce() + Send + 'static) {
+        if self.here() {
+            job();
+            return;
+        }
+        let held = self.held.lock().unwrap();
+        if held.is_empty() {
+            drop(held);
+            self.jobs.send((true, Box::new(job))).expect("the GL thread stopped");
+        } else {
+            self.hold(held, Held::Job(Box::new(job)));
+        }
+    }
+
+    /// posts work something waits on, the draws held going first.
+    fn post_now(&self, job: impl FnOnce() + Send + 'static) {
         if self.here() {
             job();
         } else {
@@ -3674,11 +3697,14 @@ impl Worker {
             job.submit_logged(gl);
             return;
         }
-        let mut held = self.held.lock().unwrap();
+        self.hold(self.held.lock().unwrap(), Held::Draw(job, gl));
+    }
+
+    fn hold(&self, mut held: std::sync::MutexGuard<Vec<Held>>, item: Held) {
         if held.capacity() == 0 {
             *held = DRAWN.take(16);
         }
-        held.push((job, gl));
+        held.push(item);
         if held.len() >= 16 {
             let draws = std::mem::take(&mut *held);
             drop(held);
@@ -3693,12 +3719,15 @@ impl Worker {
         }
     }
 
-    fn send_draws(&self, mut draws: Vec<(DrawJob, GlRef)>) {
+    fn send_draws(&self, mut draws: Vec<Held>) {
         self.jobs
             .send((
                 true,
                 Box::new(move || {
-                    draws.drain(..).for_each(|(draw, gl)| draw.submit_logged(gl));
+                    draws.drain(..).for_each(|held| match held {
+                        Held::Draw(draw, gl) => draw.submit_logged(gl),
+                        Held::Job(job) => job(),
+                    });
                     DRAWN.give(draws);
                 }),
             ))
@@ -5840,7 +5869,7 @@ impl Gles {
         self.presenting.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let presenting = self.presenting.clone();
         let gl = self.gl;
-        self.worker.post_keeping(move || {
+        self.worker.post_now(move || {
             // the shown screens' clears, those of pictures still being drawn
             // wait for their draws
             for part in &parts {
