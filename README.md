@@ -6,6 +6,9 @@ instead of emulated.
 **[Start here](START_HERE.md)** to play · [Which games work](docs/compatibility.md) ·
 [Latest release](https://github.com/whovian64/pocket-native/releases/latest)
 
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/fZ7Q9hmWCd)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/whovian64)
+
 ## Now on Android
 
 Pocket Native now runs on Android too, on one screen or two, thanks to
