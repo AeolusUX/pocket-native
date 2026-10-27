@@ -6624,6 +6624,63 @@ impl Gles {
         self.worker.run(|| ());
     }
 
+    /// the surfaces of two eyes' buffers, colour then depth, alike in kind
+    /// and size, a copy can go between.
+    fn eye_surfaces(&self, first: [(u32, u32); 2], other: [(u32, u32); 2]) -> Option<[(usize, usize); 2]> {
+        let find = |(addr, size): (u32, u32), depth: bool| self.surfaces.iter().position(|s| s.addr == addr && s.tiled && s.size() == size && matches!(s.kind, Kind::Depth(_)) == depth);
+        let pairs = [(find(first[0], false)?, find(other[0], false)?), (find(first[1], true)?, find(other[1], true)?)];
+        let shape = |i: usize| (self.surfaces[i].width, self.surfaces[i].height, self.surfaces[i].kind);
+        pairs.iter().all(|&(a, b)| shape(a) == shape(b)).then_some(pairs)
+    }
+
+    pub(crate) fn can_mirror(&self, first: [(u32, u32); 2], other: [(u32, u32); 2]) -> bool {
+        self.eye_surfaces(first, other).is_some()
+    }
+
+    /// copies one eye's colour and depth over the other's, the draws the
+    /// other left out as stereo twins.
+    pub(crate) fn mirror(&mut self, first: [(u32, u32); 2], other: [(u32, u32); 2]) -> Result<(), String> {
+        let pairs = self.eye_surfaces(first, other).ok_or("an eye's buffers are gone")?;
+        let mut copies = Vec::new();
+        for (i, &(from, to)) in pairs.iter().enumerate() {
+            let (read, draw) = match i {
+                0 => (self.framebuffer(Some(from), None)?, self.framebuffer(Some(to), None)?),
+                _ => (self.framebuffer(None, Some(from))?, self.framebuffer(None, Some(to))?),
+            };
+            let mask = if i == 0 { glow::COLOR_BUFFER_BIT } else { glow::DEPTH_BUFFER_BIT | glow::STENCIL_BUFFER_BIT };
+            let size = (self.up(self.surfaces[from].width) as i32, self.up(self.surfaces[from].height) as i32);
+            copies.push((read, draw, mask, size, self.surfaces[from].texture, self.surfaces[to].texture));
+        }
+        let gl = self.gl;
+        self.worker.post_keeping(move || {
+            for &(.., from, to) in &copies {
+                flush_clears(Some(from));
+                flush_clears(Some(to));
+            }
+            disturb();
+            // SAFETY: on the GL thread, the framebuffers are the surfaces'
+            // and both of a copy the same size
+            unsafe {
+                gl.disable(glow::SCISSOR_TEST);
+                gl.color_mask(true, true, true, true);
+                gl.depth_mask(true);
+                gl.stencil_mask(0xFF);
+                for (read, draw, mask, (width, height), ..) in copies {
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(read));
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(draw));
+                    gl.blit_framebuffer(0, 0, width, height, 0, 0, width, height, mask, glow::NEAREST);
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        });
+        for (_, to) in pairs {
+            let height = self.surfaces[to].height;
+            self.surfaces[to].drew((0, height));
+            self.surfaces[to].used = self.flushes;
+        }
+        Ok(())
+    }
+
     /// sends the draws held back.
     pub fn flush_draws(&self) {
         self.worker.flush();

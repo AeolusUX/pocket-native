@@ -20,6 +20,21 @@ pub const INPUT_REGISTERS: usize = 16;
 pub const OUTPUT_REGISTERS: usize = 16;
 pub const TEMP_REGISTERS: usize = 16;
 
+/// a float uniform from the words that upload it, four singles, or four
+/// 24-bit floats packed most significant first across three words.
+fn float_uniform(staged: &[u32], wide: bool) -> Vec4 {
+    if wide {
+        [f32::from_bits(staged[3]), f32::from_bits(staged[2]), f32::from_bits(staged[1]), f32::from_bits(staged[0])]
+    } else {
+        [
+            isa::decode_float24(staged[2] & 0x00FF_FFFF),
+            isa::decode_float24(((staged[1] & 0x0000_FFFF) << 8) | (staged[2] >> 24)),
+            isa::decode_float24(((staged[0] & 0x0000_00FF) << 16) | (staged[1] >> 16)),
+            isa::decode_float24(staged[0] >> 8),
+        ]
+    }
+}
+
 /// a four-component vector, which is the only data type the shader has.
 pub type Vec4 = [f32; 4];
 
@@ -170,6 +185,18 @@ impl ShaderUnit {
         }
     }
 
+    /// whether uploading words from the register the raw index value names
+    /// would leave every float uniform as it is.
+    pub fn uploads_nothing_new(&self, raw: u32, words: &[u32]) -> bool {
+        let wide = raw & 0x8000_0000 != 0;
+        let size = if wide { 4 } else { 3 };
+        words.len().is_multiple_of(size)
+            && words.chunks(size).enumerate().all(|(i, staged)| {
+                let value = float_uniform(staged, wide);
+                self.float_uniforms.get((raw & 0x7F) as usize + i).is_some_and(|old| old.map(f32::to_bits) == value.map(f32::to_bits))
+            })
+    }
+
     pub fn upload_float_uniform(&mut self, word: u32) {
         let needed = if self.float_uniform_wide { 4 } else { 3 };
         if self.float_uniform_component < 4 {
@@ -183,23 +210,7 @@ impl ShaderUnit {
         let staged = self.float_uniform_staging;
         self.float_uniform_component = 0;
 
-        let value = if self.float_uniform_wide {
-            [
-                f32::from_bits(staged[3]),
-                f32::from_bits(staged[2]),
-                f32::from_bits(staged[1]),
-                f32::from_bits(staged[0]),
-            ]
-        } else {
-            // the four components are packed most significant first across
-            // three words.
-            [
-                isa::decode_float24(staged[2] & 0x00FF_FFFF),
-                isa::decode_float24(((staged[1] & 0x0000_FFFF) << 8) | (staged[2] >> 24)),
-                isa::decode_float24(((staged[0] & 0x0000_00FF) << 16) | (staged[1] >> 16)),
-                isa::decode_float24(staged[0] >> 8),
-            ]
-        };
+        let value = float_uniform(&staged, self.float_uniform_wide);
 
         if value.iter().any(|c| c.is_nan()) {
             log::trace!(

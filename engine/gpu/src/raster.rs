@@ -904,7 +904,7 @@ impl TextureCache {
     }
 
     /// a draw writes to size bytes at addr.
-    fn wrote(&mut self, addr: u32, size: u32) {
+    pub(crate) fn wrote(&mut self, addr: u32, size: u32) {
         if self.written.last() != Some(&(addr, size)) {
             self.written.push((addr, size));
         }
@@ -2323,7 +2323,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     }
     #[cfg(feature = "gles")]
     if compiling {
-        if resources.stood_in >= STAND_IN_VERTICES && resources.shown_from.contains(&state.target.addr) {
+        if resources.stood_in >= STAND_IN_VERTICES && resources.shown_from.contains(&memory.translate(state.target.addr)) {
             return 0;
         }
         resources.stood_in += vertex_count as u32;
