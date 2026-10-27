@@ -265,8 +265,11 @@ fn open_host_archive(system: &System, archive_id: u32, path: &[u8]) -> Result<Ho
         return Ok(archive);
     }
     let id = path.get(4..8).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
-    if archive_id == ARCHIVE_SHARED_EXTDATA && id == PLAY_COINS && !archive.exists() {
-        make_play_coins(&archive)?;
+    if archive_id == ARCHIVE_SHARED_EXTDATA && id == PLAY_COINS {
+        if !archive.exists() {
+            make_play_coins(&archive)?;
+        }
+        make_mii_database(&archive)?;
     }
     if archive.exists() {
         return Ok(archive);
@@ -277,9 +280,19 @@ fn open_host_archive(system: &System, archive_id: u32, path: &[u8]) -> Result<Ho
     })
 }
 
-/// the shared extra data holding the play coins, which every console has
-/// and titles open without ever creating it.
+/// the shared extra data holding the play coins and the Mii database, which
+/// every console has and titles open without ever creating it.
 const PLAY_COINS: u32 = 0xF000_000B;
+
+/// the Mii database with the console's Mii, when there is none: Mario Kart 7
+/// stops at "There are currently no Mii characters" without one.
+fn make_mii_database(archive: &HostArchive) -> Result<(), ResultCode> {
+    let file = archive.resolve("CFL_DB.dat")?;
+    if file.exists() {
+        return Ok(());
+    }
+    std::fs::write(file, super::mii_selector::database()).map_err(|_| errors::FS_NOT_FORMATTED)
+}
 
 /// makes the play coins' extra data the way a console that never walked
 /// anywhere has it, a magic, 42 coins, no steps and the date they were

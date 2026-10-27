@@ -28,6 +28,40 @@ pub fn result() -> Vec<u8> {
     result
 }
 
+/// the Mii database, CFL_DB.dat in the shared extra data with the play
+/// coins: the console's Mii in the first of Mii Maker's hundred places, the
+/// rest empty, as a console has it after its first Mii. each half carries a
+/// CRC-16/XMODEM of itself, big endian.
+pub fn database() -> Vec<u8> {
+    const MIIS: usize = 0x8;
+    const MII_SIZE: usize = 0x5C;
+    const HEARD: usize = 0x23F8;
+    const NODES: usize = 0x2400;
+    const NODE_SIZE: usize = 0xE;
+    const FIRST_CHECKSUM: usize = 0xC81E;
+    const INVITED: usize = 0xC820;
+    const SECOND_CHECKSUM: usize = 0xE4BE;
+    const SIZE: usize = 0x4BD20;
+    let mut db = vec![0u8; SIZE];
+    db[..4].copy_from_slice(b"CFOG");
+    db[4..8].copy_from_slice(&0x100u32.to_le_bytes());
+    db[MIIS..MIIS + MII_SIZE].copy_from_slice(&console_mii()[..MII_SIZE]);
+    // the Miis met or received, a list of three thousand with no head or
+    // tail, each place pointing nowhere
+    db[HEARD..HEARD + 4].copy_from_slice(b"CFHE");
+    db[HEARD + 4..NODES].fill(0xFF);
+    for node in db[NODES..NODES + 3000 * NODE_SIZE].chunks_mut(NODE_SIZE) {
+        node[10..].copy_from_slice(&[0xFF, 0x7F, 0xFF, 0x7F]);
+    }
+    let checksum = crc16(&db[..FIRST_CHECKSUM]);
+    db[FIRST_CHECKSUM..INVITED].copy_from_slice(&checksum.to_be_bytes());
+    // no invitations
+    db[INVITED..INVITED + 4].copy_from_slice(b"CFRA");
+    let checksum = crc16(&db[INVITED..SECOND_CHECKSUM]);
+    db[SECOND_CHECKSUM..SECOND_CHECKSUM + 2].copy_from_slice(&checksum.to_be_bytes());
+    db
+}
+
 /// a normal Mii and not a special one, made the day the 3DS came out, in
 /// two second steps since 2010.
 const MII_ID: u32 = 0x9000_0000 | (421 * 86_400 / 2);
@@ -112,6 +146,20 @@ mod tests {
     #[test]
     fn the_checksum_is_crc16_xmodem() {
         assert_eq!(crc16(b"123456789"), 0x31C3);
+    }
+
+    /// the database holds the console's Mii first, and both its halves'
+    /// checksums hold.
+    #[test]
+    fn the_database_holds_the_consoles_mii() {
+        let db = database();
+        assert_eq!(db.len(), 0x4BD20);
+        assert_eq!(&db[..4], b"CFOG");
+        assert_eq!(db[0x8..0x8 + 0x5C], console_mii()[..0x5C]);
+        assert!(db[0x8 + 0x5C..0x23F8].iter().all(|&b| b == 0), "one Mii");
+        assert_eq!(u16::from_be_bytes([db[0xC81E], db[0xC81F]]), crc16(&db[..0xC81E]));
+        assert_eq!(&db[0xC820..0xC824], b"CFRA");
+        assert_eq!(u16::from_be_bytes([db[0xE4BE], db[0xE4BF]]), crc16(&db[0xC820..0xE4BE]));
     }
 
     #[test]
