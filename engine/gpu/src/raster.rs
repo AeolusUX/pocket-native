@@ -774,19 +774,7 @@ pub struct Resources {
     /// the host GPU, when draws go to it rather than to the software path.
     #[cfg(feature = "gles")]
     pub(crate) hardware: Option<HostRenderer>,
-    /// the colour buffers the last pictures shown came from, and how many
-    /// vertices this frame were shaded on the CPU while their programs
-    /// compiled: past a budget, a draw into one of those buffers waits a
-    /// frame or two for its program rather than drag the frame out further.
-    /// a draw into anything else, a texture a title may make only once, is
-    /// never left out.
-    pub(crate) shown_from: [u32; 4],
-    pub(crate) stood_in: u32,
 }
-
-/// the vertices a frame shades on the CPU while programs compile before
-/// draws into a picture shown wait for theirs, about 10 ms on the R36S.
-const STAND_IN_VERTICES: u32 = 1500;
 
 /// in fast mode, index buffers and vertex arrays as draws read them, kept
 /// for a few command lists before they are read again, the scenery's meshes
@@ -2320,13 +2308,6 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
                 Err(_) => {}
             }
         }
-    }
-    #[cfg(feature = "gles")]
-    if compiling {
-        if resources.stood_in >= STAND_IN_VERTICES && resources.shown_from.contains(&memory.translate(state.target.addr)) {
-            return 0;
-        }
-        resources.stood_in += vertex_count as u32;
     }
     let processed;
     let shaded = match vertices {
