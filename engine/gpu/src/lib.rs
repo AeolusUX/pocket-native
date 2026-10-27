@@ -632,6 +632,11 @@ impl Gpu {
         let output_end = output_paddr as u64 + (output_dimensions & 0xFFFF) as u64 * (output_dimensions >> 16) as u64 * output_bytes;
         let reached = self.on_screen(memory, output_paddr, (output_end - output_paddr as u64) as u32);
         if let Some((screen, buffer)) = reached {
+            let from = memory.translate(input_paddr);
+            if !self.resources.shown_from.contains(&from) {
+                self.resources.shown_from.rotate_right(1);
+                self.resources.shown_from[0] = from;
+            }
             self.stale[screen].retain(|&stale| stale != buffer);
             if self.skipping {
                 self.stale[screen].push(buffer);
@@ -1190,6 +1195,7 @@ impl Gpu {
     /// that makes one a frame loses nothing shown, one that makes one every
     /// other frame never sends two in a row.
     pub fn next_frame(&mut self, behind: bool, unshown: bool) {
+        self.resources.stood_in = 0;
         self.top_sent_before = [self.top_sent_before[1], self.top_sent];
         self.top_sent = false;
         self.skip_draws = behind || (unshown && self.top_sent_before == [true, true]);
