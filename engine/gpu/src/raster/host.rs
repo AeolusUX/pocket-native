@@ -39,6 +39,9 @@ pub(super) struct Draw<'a> {
     /// what the fragment registers' changes number, the same as the last
     /// draw's while none changed.
     pub(super) fragment_state: u64,
+    /// shaded on the CPU only until its own program is built, which needs
+    /// no program of its own for those few frames.
+    pub(super) stand_in: bool,
 }
 
 /// the triangles of a draw.

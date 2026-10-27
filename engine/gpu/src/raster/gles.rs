@@ -6437,7 +6437,13 @@ impl Gles {
             let flags = enabled | split << 4 | sources.into_iter().enumerate().map(|(unit, source)| (source as u32) << (8 + unit)).sum::<u32>() | depth_flags << 12 | (writes_depth as u32) << 16 | (draw.lighting.is_some() as u32) << 17;
             let inputs = || std::iter::once(format!("{flags:x}")).chain(key_registers().filter(|&register| r[register] != 0).map(|register| format!("{register:x}={:x}", r[register]))).collect::<Vec<_>>().join(" ");
             let mut exact = true;
-            let program = match self.program(&constants, writes_depth, &lighting, vertex, false, Some(&inputs)) {
+            // a stand-in takes a program of its own only when one was built,
+            // its own vertex program comes first and makes it needless
+            let built = match draw.stand_in {
+                true => Ok(self.programs.get(&(constants, writes_depth, lighting.clone(), vertex)).copied()),
+                false => self.program(&constants, writes_depth, &lighting, vertex, false, Some(&inputs)),
+            };
+            let program = match built {
                 Ok(Some(program)) => program,
                 // shaded on the CPU meanwhile
                 Ok(None) if vertex != 0 => return Err(COMPILING.to_owned()),

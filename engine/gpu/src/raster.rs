@@ -1623,6 +1623,7 @@ impl DrawState<'_> {
             fog: self.fog.is_some(),
             fog_table: self.fog_table,
             fragment_state: self.fragment_state,
+            stand_in: false,
         }
     }
 }
@@ -2265,6 +2266,8 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
         Vertices::Shaded(_) => None,
     };
     #[cfg(feature = "gles")]
+    let mut compiling = false;
+    #[cfg(feature = "gles")]
     if let (Some((vertex_shader, inputs, order, fetched)), Some(hardware)) = (unshaded, resources.hardware.as_mut()) {
         let target = &state.target;
         let whole = target.buffer_width.is_multiple_of(8) && target.buffer_height.is_multiple_of(8);
@@ -2300,7 +2303,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
             match hardware.draw(memory, &state.hardware(registers, host::Geometry::Shaded(&shading))) {
                 Ok(()) => return (indices.len() / 3) as u32,
                 Err(_) if fetched.is_some() => return NOT_FETCHED,
-                Err(error) if error == gles::COMPILING => {}
+                Err(error) if error == gles::COMPILING => compiling = true,
                 Err(error) if first_time(&error) => log::error!("the GPU could not shade, {error}, shading on the CPU"),
                 Err(_) => {}
             }
@@ -2348,7 +2351,9 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
         let target = &state.target;
         // tiles are whole in any buffer a title really draws into
         if target.buffer_width.is_multiple_of(8) && target.buffer_height.is_multiple_of(8) {
-            match hardware.draw(memory, &state.hardware(registers, host::Geometry::Triangles(&triangles))) {
+            let mut draw = state.hardware(registers, host::Geometry::Triangles(&triangles));
+            draw.stand_in = compiling;
+            match hardware.draw(memory, &draw) {
                 Ok(()) => return triangle_count as u32,
                 Err(error) if first_time(&error) => log::error!("the GPU could not draw, {error}, drawing in software"),
                 Err(_) => {}
